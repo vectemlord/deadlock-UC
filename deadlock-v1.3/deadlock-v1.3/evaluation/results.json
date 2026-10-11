@@ -1,0 +1,344 @@
+{
+  "generatedAt": "2026-10-07T05:51:26.444Z",
+  "host": {
+    "cpus": 1,
+    "model": "Intel(R) Xeon(R) Processor @ 2.10GHz",
+    "node": "v22.22.2"
+  },
+  "direct": [
+    {
+      "scenario": "1 room x 10 players",
+      "version": "v1.2",
+      "proto": 1,
+      "rooms": 1,
+      "playersPerRoom": 10,
+      "spectatorsPerRoom": 0,
+      "clients": 10,
+      "secs": 10,
+      "playerDownKiBps": 199.6,
+      "spectatorDownKiBps": null,
+      "totalDownMbit": 16.35,
+      "playerFramesPerSec": 30,
+      "playerUpMsgsPerSec": 30.1,
+      "playerUpKiBps": 2.27,
+      "frameGapMs": {
+        "p50": 33.2,
+        "p99": 42.4,
+        "max": 51.5
+      },
+      "pingMs": {
+        "n": 200,
+        "p50": 1,
+        "p95": 2,
+        "max": 3
+      },
+      "serverCpuPct": 5.1
+    },
+    {
+      "scenario": "1 room x 10 players",
+      "version": "v1.3",
+      "proto": 2,
+      "rooms": 1,
+      "playersPerRoom": 10,
+      "spectatorsPerRoom": 0,
+      "clients": 10,
+      "secs": 10,
+      "playerDownKiBps": 9.7,
+      "spectatorDownKiBps": null,
+      "totalDownMbit": 0.79,
+      "playerFramesPerSec": 30,
+      "playerUpMsgsPerSec": 5.8,
+      "playerUpKiBps": 0.38,
+      "frameGapMs": {
+        "p50": 33.4,
+        "p99": 53.7,
+        "max": 104.6
+      },
+      "pingMs": {
+        "n": 200,
+        "p50": 1,
+        "p95": 2,
+        "max": 12
+      },
+      "serverCpuPct": 3.9
+    },
+    {
+      "scenario": "10 rooms x 10 players",
+      "version": "v1.2",
+      "proto": 1,
+      "rooms": 10,
+      "playersPerRoom": 10,
+      "spectatorsPerRoom": 0,
+      "clients": 100,
+      "secs": 10,
+      "playerDownKiBps": 194.8,
+      "spectatorDownKiBps": null,
+      "totalDownMbit": 159.54,
+      "playerFramesPerSec": 30.1,
+      "playerUpMsgsPerSec": 30.2,
+      "playerUpKiBps": 2.29,
+      "frameGapMs": {
+        "p50": 33,
+        "p99": 39.3,
+        "max": 45.2
+      },
+      "pingMs": {
+        "n": 2000,
+        "p50": 4,
+        "p95": 11,
+        "max": 17
+      },
+      "serverCpuPct": 21.1
+    },
+    {
+      "scenario": "10 rooms x 10 players",
+      "version": "v1.3",
+      "proto": 2,
+      "rooms": 10,
+      "playersPerRoom": 10,
+      "spectatorsPerRoom": 0,
+      "clients": 100,
+      "secs": 10,
+      "playerDownKiBps": 9.7,
+      "spectatorDownKiBps": null,
+      "totalDownMbit": 7.94,
+      "playerFramesPerSec": 30,
+      "playerUpMsgsPerSec": 5.8,
+      "playerUpKiBps": 0.38,
+      "frameGapMs": {
+        "p50": 33.3,
+        "p99": 36.9,
+        "max": 71.4
+      },
+      "pingMs": {
+        "n": 2000,
+        "p50": 3,
+        "p95": 8,
+        "max": 10
+      },
+      "serverCpuPct": 9.4
+    },
+    {
+      "scenario": "1 room x 10 players + 20 spectators",
+      "version": "v1.2",
+      "proto": 1,
+      "rooms": 1,
+      "playersPerRoom": 10,
+      "spectatorsPerRoom": 20,
+      "clients": 30,
+      "secs": 10,
+      "playerDownKiBps": 197.7,
+      "spectatorDownKiBps": 197.7,
+      "totalDownMbit": 48.59,
+      "playerFramesPerSec": 30.1,
+      "playerUpMsgsPerSec": 30.1,
+      "playerUpKiBps": 2.28,
+      "frameGapMs": {
+        "p50": 33.2,
+        "p99": 37.7,
+        "max": 45.7
+      },
+      "pingMs": {
+        "n": 200,
+        "p50": 1,
+        "p95": 6,
+        "max": 6
+      },
+      "serverCpuPct": 8.1
+    },
+    {
+      "scenario": "1 room x 10 players + 20 spectators",
+      "version": "v1.3",
+      "proto": 2,
+      "rooms": 1,
+      "playersPerRoom": 10,
+      "spectatorsPerRoom": 20,
+      "clients": 30,
+      "secs": 10,
+      "playerDownKiBps": 9.8,
+      "spectatorDownKiBps": 4.9,
+      "totalDownMbit": 1.6,
+      "playerFramesPerSec": 30,
+      "playerUpMsgsPerSec": 5.9,
+      "playerUpKiBps": 0.39,
+      "frameGapMs": {
+        "p50": 33.3,
+        "p99": 42.6,
+        "max": 46.5
+      },
+      "pingMs": {
+        "n": 200,
+        "p50": 1,
+        "p95": 2,
+        "max": 2
+      },
+      "serverCpuPct": 3.9
+    }
+  ],
+  "throttled": [
+    {
+      "link": "10 Mbit uplink, 30 ms RTT",
+      "version": "v1.2",
+      "proto": 1,
+      "rooms": 1,
+      "playersPerRoom": 10,
+      "spectatorsPerRoom": 0,
+      "clients": 10,
+      "secs": 14,
+      "playerDownKiBps": 122.8,
+      "spectatorDownKiBps": null,
+      "totalDownMbit": 10.06,
+      "playerFramesPerSec": 19.3,
+      "playerUpMsgsPerSec": 30.2,
+      "playerUpKiBps": 2.29,
+      "frameGapMs": {
+        "p50": 5.7,
+        "p99": 251.2,
+        "max": 3360.6
+      },
+      "pingMs": {
+        "n": 179,
+        "p50": 241,
+        "p95": 2238,
+        "max": 9398
+      },
+      "proxy": {
+        "queued": 220821,
+        "peakQueued": 327173
+      },
+      "serverCpuPct": 4.5
+    },
+    {
+      "link": "10 Mbit uplink, 30 ms RTT",
+      "version": "v1.3",
+      "proto": 2,
+      "rooms": 1,
+      "playersPerRoom": 10,
+      "spectatorsPerRoom": 0,
+      "clients": 10,
+      "secs": 14,
+      "playerDownKiBps": 10,
+      "spectatorDownKiBps": null,
+      "totalDownMbit": 0.82,
+      "playerFramesPerSec": 30,
+      "playerUpMsgsPerSec": 5.8,
+      "playerUpKiBps": 0.38,
+      "frameGapMs": {
+        "p50": 33.3,
+        "p99": 38.8,
+        "max": 53.4
+      },
+      "pingMs": {
+        "n": 280,
+        "p50": 33,
+        "p95": 35,
+        "max": 36
+      },
+      "proxy": {
+        "queued": 3630,
+        "peakQueued": 15289
+      },
+      "serverCpuPct": 3
+    },
+    {
+      "link": "4 Mbit uplink, 30 ms RTT",
+      "version": "v1.2",
+      "proto": 1,
+      "rooms": 1,
+      "playersPerRoom": 10,
+      "spectatorsPerRoom": 0,
+      "clients": 10,
+      "secs": 14,
+      "playerDownKiBps": 48.8,
+      "spectatorDownKiBps": null,
+      "totalDownMbit": 4,
+      "playerFramesPerSec": 7.5,
+      "playerUpMsgsPerSec": 30.2,
+      "playerUpKiBps": 2.29,
+      "frameGapMs": {
+        "p50": 13.3,
+        "p99": 493.9,
+        "max": 1046
+      },
+      "pingMs": {
+        "n": 69,
+        "p50": 606,
+        "p95": 6180,
+        "max": 7559
+      },
+      "proxy": {
+        "queued": 166961,
+        "peakQueued": 326052
+      },
+      "serverCpuPct": 4.2
+    },
+    {
+      "link": "4 Mbit uplink, 30 ms RTT",
+      "version": "v1.3",
+      "proto": 2,
+      "rooms": 1,
+      "playersPerRoom": 10,
+      "spectatorsPerRoom": 0,
+      "clients": 10,
+      "secs": 14,
+      "playerDownKiBps": 9.8,
+      "spectatorDownKiBps": null,
+      "totalDownMbit": 0.8,
+      "playerFramesPerSec": 29.9,
+      "playerUpMsgsPerSec": 5.7,
+      "playerUpKiBps": 0.38,
+      "frameGapMs": {
+        "p50": 33.3,
+        "p99": 38.1,
+        "max": 44.3
+      },
+      "pingMs": {
+        "n": 280,
+        "p50": 32,
+        "p95": 34,
+        "max": 35
+      },
+      "proxy": {
+        "queued": 3830,
+        "peakQueued": 15289
+      },
+      "serverCpuPct": 3.4
+    }
+  ],
+  "prediction": [
+    {
+      "rttMs": 40,
+      "inputToMotionWithoutMs": 92,
+      "inputToMotionWithMs": 18,
+      "avgErrUnits": 0.011,
+      "maxErrUnits": 0.2,
+      "hardSnaps": 0,
+      "corrections": 66,
+      "reconciles": 1796
+    },
+    {
+      "rttMs": 150,
+      "inputToMotionWithoutMs": 201,
+      "inputToMotionWithMs": 18,
+      "avgErrUnits": 0.091,
+      "maxErrUnits": 1.3,
+      "hardSnaps": 0,
+      "corrections": 1041,
+      "reconciles": 1792
+    },
+    {
+      "rttMs": 300,
+      "inputToMotionWithoutMs": 351,
+      "inputToMotionWithMs": 18,
+      "avgErrUnits": 0.044,
+      "maxErrUnits": 2.43,
+      "hardSnaps": 0,
+      "corrections": 407,
+      "reconciles": 1785
+    }
+  ],
+  "snapshot": {
+    "jsonBytes": 5203,
+    "binaryBytes": 228
+  }
+}

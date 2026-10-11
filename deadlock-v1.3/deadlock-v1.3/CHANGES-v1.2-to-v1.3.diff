@@ -1,0 +1,1384 @@
+diff -ruN '--exclude=node_modules' '--exclude=tools' '--exclude=evaluation' '--exclude=vendor' '--exclude=artifacts' '--exclude=package-lock.json' a/CHANGELOG-v1.3.md ./CHANGELOG-v1.3.md
+--- a/CHANGELOG-v1.3.md	1970-01-01 00:00:00.000000000 +0000
++++ ./CHANGELOG-v1.3.md	2026-10-07 05:51:49.821586277 +0000
+@@ -0,0 +1,46 @@
++# Deadlock: Kernel Wars v1.3 — multiplayer netcode update
++
++Goal: stop lag from growing as players join a room. Everything below is implemented, tested (`npm test`, 37 tests)
++and measured head-to-head against v1.2 (`npm run evaluate`, results in `EVALUATION.md`).
++Press **C** in the game (or the **Δ** tab on the left edge) to open the in-game sidebar with this list and live network numbers.
++
++## What changed
++
++| # | Area | Change | Files |
++|---|---|---|---|
++| 1 | Protocol | Per-tick state is a quantized **binary frame** (29 B header + 19 B/player + 10 B/bullet) instead of ~5 KB of JSON | `shared/codec.js` |
++| 2 | Protocol | Static data (name, role, team, max HP) sent once in a `roster` message; feed events sent once as a reliable `events` message; `meta` carries host + spectator count | `server/index.js`, `src/app.js` |
++| 3 | Server | **Backpressure**: a state frame is skipped when the client already has >16 KiB queued (`MAX_BUFFER`), instead of queueing stale data (v1.2 allowed 256 KB). Clients reporting RTT > 350 ms get 15 Hz | `server/index.js` |
++| 4 | Server | One encode per room per tick shared by all recipients; spectators at 15 Hz (10 Hz when the loop is behind); idle rooms send a 2 Hz keep-alive | `server/index.js` |
++| 5 | Client | **Snapshot interpolation**: other players are rendered ~2 ticks in the past on the server's tick timeline (adaptive 50–250 ms) | `src/netcode.js` |
++| 6 | Client | **Client-side prediction + reconciliation** using the same `stepMover()` as the server; inputs are numbered, the server acks, unacknowledged inputs are replayed | `shared/game.js`, `src/netcode.js` |
++| 7 | Input | Change-only input (+200 ms keep-alive), server-side sanitising, `try/catch` around handlers, malformed/binary/spam handling (close 1008 after 40 bad messages / 10 s) | `src/netcode.js`, `server/index.js` |
++| 8 | Ops | Drift-corrected 30 Hz loop (the old `setInterval(…, 1000/30)` ran at 30.3 Hz); `GET /api/metrics`; stale-link warning after 1 s (was 12 s) | `server/index.js`, `src/app.js` |
++
++Backward compatible: a client that does not send `proto: 2` (a v1.2 browser tab, the old tests) still receives JSON `state` messages.
++
++## Wire format (proto 2)
++`roster` `{type,v,players:[{id,name,role,team,bot,maxHp}]}` · `meta` `{type,host,spectators}` · `events` `{type,reset,events}` · binary `state`
++(layout documented at the top of `shared/codec.js`). A state frame is only decoded when its roster version matches the last `roster` message.
++Client → server input: `{type:'input', seq, input:{x,z,angle,fire?,interact?,rollback?,skill?,dash?}}`, sent only when changed.
++
++## Configuration
++`MAX_BUFFER` (bytes, default 16384) · `PORT` · `RECONNECT_GRACE_MS` (unchanged).
++
++## Running and verifying
++```
++npm ci            # installs ws + three and vendors three.js
++npm start         # http://localhost:7860 (open on other devices via http://<LAN-IP>:7860)
++npm test          # 37 tests: game rules, legacy protocol, binary codec, prediction parity, backpressure, abuse handling
++npm run evaluate  # v1.2 baseline (tools/baseline-v1.2) vs v1.3: bandwidth, CPU, throttled-uplink ping, prediction (writes EVALUATION.md)
++curl localhost:7860/api/metrics
++```
++`tools/loadtest.mjs` (protocol-aware bot clients) and `tools/throttle-proxy.mjs` (bandwidth/latency-limited TCP proxy) can be used on their own.
++
++## Known limits (please read)
++* **Not exercised in a real browser** during development (no browser in the build sandbox). The netcode modules are unit-tested headlessly and the server is tested over real WebSockets, but the Three.js/DOM integration in `src/app.js` and the sidebar should be smoke-tested on your side: open two browser tabs, create a room, join, play, press **C**.
++* Measurements come from one CPU core with emulated links, not from real phones or your real network. Treat absolute numbers as indicative.
++* `bufferedAmount` backpressure only reacts once the OS socket buffer is full. Behind a tunnel/reverse proxy the server may never observe congestion, so the main protection is the ~20× smaller frames; the RTT-based halving at 350 ms is a second line of defence.
++* Prediction covers movement, dash and the runner boost. Locks/interaction, shooting and damage stay server-authoritative (as before); mispredictions are blended away, or snapped when the error exceeds 3 units.
++* Interpolation trades ~50–120 ms of visual delay for other players against smoothness.
++* Frames carry at most 255 players/bullets/cycles; positions are quantized to 0.02 units.
+diff -ruN '--exclude=node_modules' '--exclude=tools' '--exclude=evaluation' '--exclude=vendor' '--exclude=artifacts' '--exclude=package-lock.json' a/EVALUATION.md ./EVALUATION.md
+--- a/EVALUATION.md	1970-01-01 00:00:00.000000000 +0000
++++ ./EVALUATION.md	2026-10-07 05:53:53.262963039 +0000
+@@ -0,0 +1,45 @@
++# Evaluation: v1.2 vs v1.3
++
++Generated 2026-10-07T05:51:26.444Z by `npm run evaluate`. Measured on 1 CPU core(s), Node v22.22.2, loopback + emulated links. Single-core sandbox: absolute CPU numbers include the load generator competing for the same core.
++
++## Summary
++
++| Metric | v1.2 | v1.3 |
++|---|---|---|
++| Snapshot on the wire (10 players) | 5.1 KB | 228 B |
++| Download per player | 199.6 KiB/s | 9.7 KiB/s (-95%) |
++| Upload per player | 30.1 msg/s | 5.8 msg/s |
++| Room + 20 spectators, server out | 48.59 Mbit/s | 1.6 Mbit/s |
++| Server CPU, 100 players (10 rooms) | 21.1% of 1 core | 9.4% of 1 core |
++| Ping, 10 Mbit uplink (p50 / p95) | 241 / 2238 ms | 33 / 35 ms |
++| Ping, 4 Mbit uplink (p50 / p95) | 606 / 6180 ms | 32 / 34 ms |
++| Key press to movement @ 150 ms RTT | 201 ms | 18 ms |
++
++## Direct (loopback) scenarios
++
++| Scenario | Version | Down/player KiB/s | Frames/s | Up msg/s | Total out Mbit/s | Frame gap p50/p99/max ms | Ping p50/p95/max ms | Server CPU % |
++|---|---|---|---|---|---|---|---|---|
++| 1 room x 10 players | v1.2 | 199.6 | 30 | 30.1 | 16.35 | 33.2/42.4/51.5 | 1/2/3 | 5.1 |
++| 1 room x 10 players | v1.3 | 9.7 | 30 | 5.8 | 0.79 | 33.4/53.7/104.6 | 1/2/12 | 3.9 |
++| 10 rooms x 10 players | v1.2 | 194.8 | 30.1 | 30.2 | 159.54 | 33/39.3/45.2 | 4/11/17 | 21.1 |
++| 10 rooms x 10 players | v1.3 | 9.7 | 30 | 5.8 | 7.94 | 33.3/36.9/71.4 | 3/8/10 | 9.4 |
++| 1 room x 10 players + 20 spectators | v1.2 | 197.7 | 30.1 | 30.1 | 48.59 | 33.2/37.7/45.7 | 1/6/6 | 8.1 |
++| 1 room x 10 players + 20 spectators | v1.3 | 9.8 | 30 | 5.9 | 1.6 | 33.3/42.6/46.5 | 1/2/2 | 3.9 |
++
++## Bandwidth-limited uplink (1 room, 10 players)
++
++| Link | Version | Down/player KiB/s | Frames/s | Frame gap p50/p99/max ms | Ping p50/p95/max ms | Peak proxy queue KiB |
++|---|---|---|---|---|---|---|
++| 10 Mbit uplink, 30 ms RTT | v1.2 | 122.8 | 19.3 | 5.7/251.2/3360.6 | 241/2238/9398 | 320 |
++| 10 Mbit uplink, 30 ms RTT | v1.3 | 10 | 30 | 33.3/38.8/53.4 | 33/35/36 | 15 |
++| 4 Mbit uplink, 30 ms RTT | v1.2 | 48.8 | 7.5 | 13.3/493.9/1046 | 606/6180/7559 | 318 |
++| 4 Mbit uplink, 30 ms RTT | v1.3 | 9.8 | 29.9 | 33.3/38.1/44.3 | 32/34/35 | 15 |
++
++## Client prediction (headless simulation)
++
++| RTT ms | Key press to movement, no prediction | with prediction | Avg reconcile error (units) | Max error | Hard snaps | Corrections / reconciles |
++|---|---|---|---|---|---|---|
++| 40 | 92 ms | 18 ms | 0.011 | 0.2 | 0 | 66 / 1796 |
++| 150 | 201 ms | 18 ms | 0.091 | 1.3 | 0 | 1041 / 1792 |
++| 300 | 351 ms | 18 ms | 0.044 | 2.43 | 0 | 407 / 1785 |
++
+diff -ruN '--exclude=node_modules' '--exclude=tools' '--exclude=evaluation' '--exclude=vendor' '--exclude=artifacts' '--exclude=package-lock.json' a/ONLINE.md ./ONLINE.md
+--- a/ONLINE.md	2026-10-06 00:14:04.000000000 +0000
++++ ./ONLINE.md	2026-10-07 05:51:49.836166632 +0000
+@@ -22,4 +22,6 @@
+ 
+ Pembaruan v1.1: arena 84 × 56 (12 cover), kamera mengikuti pemain, dan maksimal 20 penonton terpisah dari 10 pemain. Untuk menonton: Tonton Pertandingan → kode room → Tonton Saja. Pilih seluruh arena atau ikuti operator, atur zoom, dan buka graf atau skor.
+ 
+-Pembaruan v1.2: pertandingan 6 menit penuh tanpa batas skor 100, uplink tengah, bonus poin dua kali lipat pada menit terakhir, skill pelindung/heal untuk rekan, rematch di room yang sama, dan reconnect otomatis dengan masa tenggang 45 detik. Endpoint `/api/health` menampilkan versi `1.2`.
++Pembaruan v1.2: pertandingan 6 menit penuh tanpa batas skor 100, uplink tengah, bonus poin dua kali lipat pada menit terakhir, skill pelindung/heal untuk rekan, rematch di room yang sama, dan reconnect otomatis dengan masa tenggang 45 detik. Endpoint `/api/health` menampilkan versi `1.3`.
++
++Pembaruan v1.3 (netcode): paket status biner (~95% lebih kecil), interpolasi, prediksi sisi klien, backpressure, dan endpoint `/api/metrics`. Tekan **C** di dalam game untuk membuka sidebar perubahan kode dan angka jaringan langsung. Detail: `CHANGELOG-v1.3.md`, hasil uji: `EVALUATION.md`.
+diff -ruN '--exclude=node_modules' '--exclude=tools' '--exclude=evaluation' '--exclude=vendor' '--exclude=artifacts' '--exclude=package-lock.json' a/README.md ./README.md
+--- a/README.md	2026-10-06 07:21:14.000000000 +0000
++++ ./README.md	2026-10-07 05:51:49.836552647 +0000
+@@ -128,3 +128,6 @@
+  docker build -t deadlock-kernel-wars .
+  docker run --rm -p 7860:7860 deadlock-kernel-wars
+ ```
++
++### Netcode v1.3
++Lihat `CHANGELOG-v1.3.md` (perubahan, format paket, batasan) dan `EVALUATION.md` (perbandingan v1.2 vs v1.3). Jalankan `npm test` dan `npm run evaluate`; tekan **C** di game untuk sidebar perubahan.
+diff -ruN '--exclude=node_modules' '--exclude=tools' '--exclude=evaluation' '--exclude=vendor' '--exclude=artifacts' '--exclude=package-lock.json' a/index.html ./index.html
+--- a/index.html	2026-10-05 12:54:49.000000000 +0000
++++ ./index.html	2026-10-06 16:15:04.926902984 +0000
+@@ -36,7 +36,7 @@
+     </div>
+   </section>
+ </main>
+-<footer class="home-footer"><span><i></i> SYSTEMS ONLINE <span class="muted">/</span> OPERATING SYSTEMS, REIMAGINED.</span><button data-nav="intel">BUKAN KUIS. INI PERANG RESOURCE. <span>↗</span></button><span class="muted">BUILD 1.2</span></footer>
++<footer class="home-footer"><span><i></i> SYSTEMS ONLINE <span class="muted">/</span> OPERATING SYSTEMS, REIMAGINED.</span><button data-nav="intel">BUKAN KUIS. INI PERANG RESOURCE. <span>↗</span></button><span class="muted">BUILD 1.3</span></footer>
+ </div>
+ <div id="hud" class="hidden">
+   <div class="hud-top"><button id="leave-game" class="icon-button" aria-label="Keluar pertandingan">←</button><button id="game-help" class="icon-button" aria-label="Panduan bermain">?</button><div class="hud-team cyan"><small>TEAM SYNCHRON</small><b id="score-a">00</b><div class="score-track"><i id="score-bar-a"></i></div></div><div class="match-clock"><small id="match-mode">PRACTICE · 5V5</small><strong id="timer">06:00</strong><span id="match-rule">6 MENIT PENUH</span></div><div class="hud-team coral"><small>TEAM SYNTAX</small><b id="score-b">00</b><div class="score-track"><i id="score-bar-b"></i></div></div><div class="hud-network" id="latency">LOCAL<br><small>30 TICK</small></div></div>
+@@ -56,6 +56,7 @@
+ </div>
+ <div id="modal-backdrop" class="hidden"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><button id="close-modal" class="icon-button close-modal" aria-label="Tutup">✕</button><div id="modal-content"></div></section></div>
+ <div id="connection-banner" class="hidden" role="status">Koneksi terputus · menyambung ulang otomatis…<small>Slot disimpan 45 detik. Pertandingan di server tetap berjalan.</small></div>
++<div id="net-warning" class="hidden" role="status">⚠ KONEKSI LAMBAT · <b>0.0s</b> tanpa data dari server</div>
+ <div id="toast" role="status" class="hidden"></div>
+ <script type="module" src="./src/app.js"></script>
+ </body></html>
+diff -ruN '--exclude=node_modules' '--exclude=tools' '--exclude=evaluation' '--exclude=vendor' '--exclude=artifacts' '--exclude=package-lock.json' a/package.json ./package.json
+--- a/package.json	2026-10-05 08:48:42.000000000 +0000
++++ ./package.json	2026-10-07 05:37:48.023195537 +0000
+@@ -1,13 +1,15 @@
+ {
+   "name": "deadlock-kernel-wars",
+-  "version": "1.2.0",
++  "version": "1.3.0",
+   "private": true,
+   "type": "module",
+   "scripts": {
+     "start": "node server/index.js",
+     "dev": "node --watch server/index.js",
+     "test": "node --test tests/*.test.js",
+-    "postinstall": "node scripts/vendor.js"
++    "postinstall": "node scripts/vendor.js",
++    "loadtest": "node tools/loadtest.mjs",
++    "evaluate": "node tools/evaluate.mjs"
+   },
+   "dependencies": {
+     "three": "0.180.0",
+diff -ruN '--exclude=node_modules' '--exclude=tools' '--exclude=evaluation' '--exclude=vendor' '--exclude=artifacts' '--exclude=package-lock.json' a/server/index.js ./server/index.js
+--- a/server/index.js	2026-10-05 08:45:02.000000000 +0000
++++ ./server/index.js	2026-10-07 05:47:10.714720569 +0000
+@@ -3,122 +3,290 @@
+ import path from 'node:path';
+ import {fileURLToPath} from 'node:url';
+ import {randomBytes, randomUUID} from 'node:crypto';
++import {performance} from 'node:perf_hooks';
+ import {WebSocketServer} from 'ws';
+ import {Game} from '../shared/game.js';
+-const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+-const rooms=new Map();
+-const reconnectGrace=Number(process.env.RECONNECT_GRACE_MS)||45000;
+-const mime={'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml','.png':'image/png','.ico':'image/x-icon'};
+-const server=http.createServer(async(req,res)=>{
+-  const url=new URL(req.url,'http://localhost');
+-  if(url.pathname==='/api/health') {res.writeHead(200,{'Content-Type':'application/json'});res.end(JSON.stringify({ok:true,version:'1.2',rooms:rooms.size,players:[...rooms.values()].reduce((n,r)=>n+r.clients.size,0),spectators:[...rooms.values()].reduce((n,r)=>n+r.spectators.size,0)}));return;}
+-  let name; try{name=decodeURIComponent(url.pathname);}catch{res.writeHead(400);res.end();return;}
+-  if(name==='/')name='/index.html';
+-  const allowed=name==='/index.html'||name==='/style.css'||/^\/(src|shared|public)\/[\w./-]+$/.test(name);
+-  const file=path.resolve(root,`.${name}`);
+-  if(!allowed||name.split('/').some(part=>part==='..'||part==='.')||!file.startsWith(root+path.sep)){res.writeHead(404);res.end('Not found');return;}
+-  try{const data=await readFile(file);res.writeHead(200,{'Content-Type':mime[path.extname(file)]||'application/octet-stream','X-Content-Type-Options':'nosniff','Cache-Control':'no-cache'});res.end(data);}
+-  catch{res.writeHead(404);res.end('Not found');}
++import {encodeState, rosterOf, rosterSignature} from '../shared/codec.js';
++
++const VERSION = '1.3';
++const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
++const rooms = new Map();
++const reconnectGrace = Number(process.env.RECONNECT_GRACE_MS) || 45000;
++const TICK_MS = 1000 / 30;
++// v1.3 backpressure: a state frame is only sent while the client's socket has less than this queued.
++// v1.2 allowed 256 000 bytes (~1 s of data), so a slow link accumulated a second of stale state.
++const MAX_BUFFER = Number(process.env.MAX_BUFFER) || 16 * 1024;
++const RELIABLE_LIMIT = 256000;           // roster/meta/events/errors are tiny and must not be dropped
++const LOBBY_INTERVAL = 500;              // idle (lobby / finished) rooms only need a keep-alive state
++const SPECTATOR_STRIDE = 2;              // spectators get 15 Hz; client interpolation hides the lower rate
++const DEGRADED_STRIDE = 3;               // ...and 10 Hz while the server is behind its tick budget
++const SLOW_RTT_MS = 350;                 // clients reporting a higher RTT get 15 Hz state
++const BAD_LIMIT = 40;                    // invalid messages tolerated per 10 s before the socket is closed
++const mime = {'.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon'};
++
++// ---------- metrics (exposed on /api/metrics) ----------
++const ring = new Float32Array(600);
++const metrics = {started: Date.now(), ticks: 0, overruns: 0, maxLagMs: 0, errors: 0, badMessages: 0,
++  bytesOut: 0, framesOut: 0, framesDropped: 0, window: [], lastBytes: 0};
++let loadEma = 0, degraded = false;
++const pct = (arr, p) => {const a = Array.from(arr).sort((x, y) => x - y); return a.length ? a[Math.min(a.length - 1, Math.floor(a.length * p))] : 0;};
++function metricsSnapshot() {
++  const filled = ring.subarray(0, Math.min(metrics.ticks, ring.length));
++  const sum = filled.reduce((a, b) => a + b, 0);
++  const clients = [...wss.clients].filter(ws => ws.readyState === 1);
++  const rtts = clients.map(ws => ws.rtt).filter(Number.isFinite);
++  const recent = metrics.window.filter(w => Date.now() - w.t < 5000);
++  const span = recent.length ? Math.max(1, (Date.now() - recent[0].t) / 1000) : 1;
++  const recentBytes = recent.reduce((a, w) => a + w.bytes, 0);
++  return {
++    ok: true, version: VERSION, uptimeS: Math.round((Date.now() - metrics.started) / 1000),
++    rooms: rooms.size, clients: clients.length, protocol2Clients: clients.filter(ws => ws.proto === 2).length, degraded,
++    tick: {budgetMs: +TICK_MS.toFixed(2), avgMs: +(filled.length ? sum / filled.length : 0).toFixed(3), p95Ms: +pct(filled, .95).toFixed(3), maxMs: +Math.max(0, ...filled).toFixed(3), overruns: metrics.overruns, maxLagMs: +metrics.maxLagMs.toFixed(1)},
++    network: {outKiBps: +(recentBytes / span / 1024).toFixed(1), framesOut: metrics.framesOut, framesDropped: metrics.framesDropped,
++      dropRatePct: +(metrics.framesOut + metrics.framesDropped ? metrics.framesDropped / (metrics.framesOut + metrics.framesDropped) * 100 : 0).toFixed(2),
++      avgFrameBytes: metrics.framesOut ? Math.round(metrics.bytesOut / metrics.framesOut) : 0},
++    rtt: {reported: rtts.length, avgMs: rtts.length ? Math.round(rtts.reduce((a, b) => a + b, 0) / rtts.length) : null, maxMs: rtts.length ? Math.max(...rtts) : null},
++    errors: {handler: metrics.errors, badMessages: metrics.badMessages},
++    roomList: [...rooms.values()].slice(0, 20).map(r => ({code: r.code, phase: r.game.phase, players: r.clients.size, spectators: r.spectators.size, tickMs: +r.ema.toFixed(3)})),
++  };
++}
++
++// ---------- static files + health ----------
++const server = http.createServer(async (req, res) => {
++  const url = new URL(req.url, 'http://localhost');
++  if (url.pathname === '/api/health') {
++    res.writeHead(200, {'Content-Type': 'application/json'});
++    res.end(JSON.stringify({ok: true, version: VERSION, rooms: rooms.size, players: [...rooms.values()].reduce((n, r) => n + r.clients.size, 0), spectators: [...rooms.values()].reduce((n, r) => n + r.spectators.size, 0)}));
++    return;
++  }
++  if (url.pathname === '/api/metrics') {res.writeHead(200, {'Content-Type': 'application/json', 'Cache-Control': 'no-store'}); res.end(JSON.stringify(metricsSnapshot())); return;}
++  let name; try {name = decodeURIComponent(url.pathname);} catch {res.writeHead(400); res.end(); return;}
++  if (name === '/') name = '/index.html';
++  const allowed = name === '/index.html' || name === '/style.css' || /^\/(src|shared|public)\/[\w./-]+$/.test(name);
++  const file = path.resolve(root, `.${name}`);
++  if (!allowed || name.split('/').some(part => part === '..' || part === '.') || !file.startsWith(root + path.sep)) {res.writeHead(404); res.end('Not found'); return;}
++  try {const data = await readFile(file); res.writeHead(200, {'Content-Type': mime[path.extname(file)] || 'application/octet-stream', 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'no-cache'}); res.end(data);}
++  catch {res.writeHead(404); res.end('Not found');}
+ });
+-const wss=new WebSocketServer({server,path:'/ws',maxPayload:4096});
+-const send=(ws,data)=>{if(ws.readyState===1 && ws.bufferedAmount<256000)ws.send(JSON.stringify(data));};
+-function cleanup(room){
+-  if(!room.clients.size&&![...room.pending.values()].some(p=>!p.spectating)){
+-    for(const viewer of room.spectators.values()){send(viewer,{type:'room_closed',message:'Semua pemain sudah keluar. Room ditutup.'});viewer.room=null;viewer.spectating=false;}
++const wss = new WebSocketServer({server, path: '/ws', maxPayload: 4096});
++
++// ---------- sending ----------
++// Reliable control messages. Rarely sent and tiny, so only the old generous limit applies.
++const send = (ws, data) => {if (ws.readyState === 1 && ws.bufferedAmount < RELIABLE_LIMIT) ws.send(typeof data === 'string' ? data : JSON.stringify(data));};
++// Droppable state frame. State is idempotent (the newest frame supersedes older ones),
++// so when the socket is congested we skip a frame instead of queueing stale data behind it.
++function sendFrame(ws, payload) {
++  if (ws.readyState !== 1) return;
++  if (ws.bufferedAmount > MAX_BUFFER) {ws.dropped = (ws.dropped || 0) + 1; metrics.framesDropped++; return;}
++  ws.send(payload);
++  const bytes = typeof payload === 'string' ? Buffer.byteLength(payload) : payload.byteLength;
++  metrics.bytesOut += bytes; metrics.framesOut++; metrics.lastBytes += bytes;
++}
++
++function cleanup(room) {
++  if (!room.clients.size && ![...room.pending.values()].some(p => !p.spectating)) {
++    for (const viewer of room.spectators.values()) {send(viewer, {type: 'room_closed', message: 'Semua pemain sudah keluar. Room ditutup.'}); viewer.room = null; viewer.spectating = false;}
+     rooms.delete(room.code);
+-  }else if(!room.clients.has(room.host)&&room.clients.size)room.host=room.clients.keys().next().value;
++  } else if (!room.clients.has(room.host) && room.clients.size) room.host = room.clients.keys().next().value;
+ }
+-function leave(ws,temporary=false){
+-  const room=rooms.get(ws.room);if(!room)return;
+-  if(ws.spectating)room.spectators.delete(ws.id);
++function leave(ws, temporary = false) {
++  const room = rooms.get(ws.room); if (!room) return;
++  if (ws.spectating) room.spectators.delete(ws.id);
+   else room.clients.delete(ws.id);
+-  if(temporary){
+-    room.pending.set(ws.token,{id:ws.id,spectating:!!ws.spectating,expires:Date.now()+reconnectGrace});
+-    const p=room.game.players.find(p=>p.id===ws.id);
+-    if(p){room.game.release(p);p.input={};p.shield=0;p.boost=0;p.disconnected=true;}
+-  }else if(!ws.spectating){room.game.removePlayer(ws.id);}
++  if (temporary) {
++    room.pending.set(ws.token, {id: ws.id, spectating: !!ws.spectating, expires: Date.now() + reconnectGrace});
++    const p = room.game.players.find(p => p.id === ws.id);
++    if (p) {room.game.release(p); p.input = {}; p.shield = 0; p.boost = 0; p.disconnected = true;}
++  } else if (!ws.spectating) {room.game.removePlayer(ws.id);}
+   cleanup(room);
+-  ws.room=null;ws.spectating=false;
++  ws.room = null; ws.spectating = false;
+ }
+-function expire(room){
+-  for(const [token,p]of room.pending){if(p.expires<=Date.now()){if(!p.spectating)room.game.removePlayer(p.id);room.pending.delete(token);}}
++function expire(room) {
++  for (const [token, p] of room.pending) {if (p.expires <= Date.now()) {if (!p.spectating) room.game.removePlayer(p.id); room.pending.delete(token);}}
+   cleanup(room);
+ }
+-function joined(ws,room,resumed=false){
+-  send(ws,{type:'joined',id:ws.id,code:room.code,spectator:!!ws.spectating,token:ws.token,resumed});
++function newRoom(ws, code) {
++  return {game: new Game(), clients: new Map(), spectators: new Map(), pending: new Map(), host: ws.id, code,
++    rv: 0, rosterSig: null, rosterMsg: '', rosterDirty: false, metaKey: '', metaMsg: '', metaDirty: false,
++    lastEventId: 0, lastPhase: '', lastSentAt: 0, frame: 0, ema: 0};
++}
++// Recompute the roster / meta messages. Dirty flags are cleared only by broadcast(), so a refresh
++// triggered by a join can never swallow an update the rest of the room still has to receive.
++function refreshRoomMeta(room) {
++  const sig = rosterSignature(room.game);
++  if (sig !== room.rosterSig) {
++    room.rosterSig = sig; room.rv = (room.rv + 1) & 255; room.rosterDirty = true;
++    room.rosterMsg = JSON.stringify({type: 'roster', v: room.rv, players: rosterOf(room.game)});
++  }
++  const metaKey = `${room.host}|${room.spectators.size}`;
++  if (metaKey !== room.metaKey) {room.metaKey = metaKey; room.metaDirty = true; room.metaMsg = JSON.stringify({type: 'meta', host: room.host, spectators: room.spectators.size});}
++}
++// Everything a protocol-2 client needs before it can decode state frames.
++function initialSync(ws, room) {
++  if (ws.proto !== 2) return;
++  refreshRoomMeta(room);
++  send(ws, room.rosterMsg); send(ws, room.metaMsg);
++  send(ws, {type: 'events', reset: true, events: room.game.events});
++  sendFrame(ws, encodeState(room.game, room.rv));
+ }
+-function resume(ws,msg){
+-  const room=rooms.get(String(msg.code||'').toUpperCase());
+-  if(room)expire(room);
+-  const saved=room?.pending.get(msg.token);
+-  if(!room||!rooms.has(room.code)||!saved){send(ws,{type:'resume_failed',message:'Sesi tidak tersedia atau batas sambung ulang 45 detik sudah habis. Silakan gabung kembali.'});return;}
++function joined(ws, room, resumed = false) {
++  send(ws, {type: 'joined', id: ws.id, code: room.code, spectator: !!ws.spectating, token: ws.token, resumed});
++  initialSync(ws, room);
++}
++function resume(ws, msg) {
++  const room = rooms.get(String(msg.code || '').toUpperCase());
++  if (room) expire(room);
++  const saved = room?.pending.get(msg.token);
++  if (!room || !rooms.has(room.code) || !saved) {send(ws, {type: 'resume_failed', message: 'Sesi tidak tersedia atau batas sambung ulang 45 detik sudah habis. Silakan gabung kembali.'}); return;}
+   room.pending.delete(msg.token);
+-  ws.id=saved.id;ws.token=msg.token;ws.room=room.code;ws.spectating=saved.spectating;
+-  if(ws.spectating)room.spectators.set(ws.id,ws);
+-  else{
+-    room.clients.set(ws.id,ws);
+-    const p=room.game.players.find(p=>p.id===ws.id);if(p)p.disconnected=false;
+-    if(!room.clients.has(room.host))room.host=ws.id;
+-  }
+-  joined(ws,room,true);
+-}
+-wss.on('connection',ws=>{
+-  ws.id=randomUUID();ws.token=randomBytes(24).toString('hex');ws.alive=true;ws.window=Date.now();ws.count=0;
+-  ws.on('pong',()=>ws.alive=true);
+-  ws.on('error',()=>{});
+-  ws.on('message',raw=>{
+-    if(Date.now()-ws.window>1000){ws.window=Date.now();ws.count=0;}
+-    if(++ws.count>90)return;
+-    let msg;try{msg=JSON.parse(raw);}catch{return;}
+-    if(!msg||typeof msg!=='object')return;
+-    if(msg.type==='ping'){send(ws,{type:'pong',at:msg.at});return;}
+-    if(msg.type==='leave'){leave(ws);return;}
+-    if(msg.type==='resume'&&!ws.room){resume(ws,msg);return;}
+-    if(msg.type==='create'||msg.type==='join'||msg.type==='spectate'){
+-      if(ws.room)return;
+-      let room,code;
+-      if(msg.type==='create'){
+-        if(rooms.size>=100){send(ws,{type:'error',message:'Server penuh. Coba beberapa saat lagi.'});return;}
+-        code=randomBytes(3).toString('hex').toUpperCase();
+-        while(rooms.has(code))code=randomBytes(3).toString('hex').toUpperCase();
+-        room={game:new Game(),clients:new Map(),spectators:new Map(),pending:new Map(),host:ws.id,code};rooms.set(code,room);
+-      }else{code=String(msg.code||'').toUpperCase();room=rooms.get(code);}
+-      if(!room){send(ws,{type:'error',message:'Room tidak ditemukan. Periksa kode undangan.'});return;}
+-      if(msg.type==='spectate'){
+-        if(room.spectators.size+[...room.pending.values()].filter(p=>p.spectating).length>=20){send(ws,{type:'error',message:'Slot penonton penuh (maksimal 20).'});return;}
+-        room.spectators.set(ws.id,ws);ws.room=code;ws.spectating=true;
+-        joined(ws,room);return;
+-      }
+-      if(room.game.phase==='finished'){send(ws,{type:'error',message:'Pertandingan sudah selesai. Buat room baru.'});return;}
+-      const humans=[0,1].map(t=>room.game.players.filter(p=>p.team===t&&!p.bot).length);
+-      const team=humans[0]<=humans[1]?0:1;
+-      if(humans[team]>=5){send(ws,{type:'error',message:'Room penuh: maksimal 10 pemain.'});return;}
+-      const bot=room.game.players.find(p=>p.bot&&p.team===team);if(bot)room.game.removePlayer(bot.id);
+-      const player=room.game.addPlayer(ws.id,msg.name,msg.role,team);
+-      if(!player){send(ws,{type:'error',message:'Tim penuh.'});return;}
+-      room.clients.set(ws.id,ws);ws.room=code;
+-      joined(ws,room);return;
+-    }
+-    const room=rooms.get(ws.room);if(!room||ws.spectating)return;
+-    if(msg.type==='input')room.game.input(ws.id,msg.input||{});
+-    if(msg.type==='rematch'&&room.host===ws.id)room.game.rematch();
+-    if(msg.type==='start'&&room.host===ws.id&&room.game.phase==='lobby'){
+-      if(!msg.bots && room.clients.size<2){send(ws,{type:'error',message:'Butuh minimal 2 pemain, atau aktifkan bot.'});return;}
+-      room.game.start(msg.bots!==false);
+-    }
++  ws.id = saved.id; ws.token = msg.token; ws.room = room.code; ws.spectating = saved.spectating;
++  if (ws.spectating) room.spectators.set(ws.id, ws);
++  else {
++    room.clients.set(ws.id, ws);
++    const p = room.game.players.find(p => p.id === ws.id); if (p) p.disconnected = false;
++    if (!room.clients.has(room.host)) room.host = ws.id;
++  }
++  joined(ws, room, true);
++}
++
++// ---------- input validation ----------
++const num = (v, lo, hi, fallback = 0) => (typeof v === 'number' && Number.isFinite(v)) ? Math.max(lo, Math.min(hi, v)) : fallback;
++function sanitizeInput(raw) {
++  if (!raw || typeof raw !== 'object') return {};
++  return {x: num(raw.x, -1, 1), z: num(raw.z, -1, 1), angle: typeof raw.angle === 'number' && Number.isFinite(raw.angle) ? num(raw.angle, -1000, 1000) : undefined,
++    fire: raw.fire === true, interact: raw.interact === true, rollback: raw.rollback === true, skill: raw.skill === true, dash: raw.dash === true};
++}
++function reject(ws) {
++  metrics.badMessages++;
++  const now = Date.now();
++  if (now - (ws.badWindow || 0) > 10000) {ws.badWindow = now; ws.bad = 0;}
++  if (++ws.bad > BAD_LIMIT) ws.close(1008, 'too many invalid messages');
++}
++
++wss.on('connection', ws => {
++  ws.id = randomUUID(); ws.token = randomBytes(24).toString('hex'); ws.alive = true; ws.window = Date.now(); ws.count = 0; ws.proto = 1; ws.dropped = 0;
++  ws.on('pong', () => ws.alive = true);
++  ws.on('error', () => {});
++  ws.on('message', (raw, isBinary) => {
++    try {handleMessage(ws, raw, isBinary);}
++    catch (err) {metrics.errors++; console.error('message handler error:', err?.message || err);}   // one bad packet must never stop the tick loop
+   });
+-  ws.on('close',()=>leave(ws,true));
++  ws.on('close', () => leave(ws, true));
+ });
+-const tick=setInterval(()=>{
+-  for(const room of rooms.values()){
+-    expire(room);if(!rooms.has(room.code))continue;
+-    room.game.update(1/30);
+-    const data={type:'state',state:room.game.snapshot(),host:room.host,spectators:room.spectators.size};
+-    for(const ws of [...room.clients.values(),...room.spectators.values()])send(ws,data);
+-  }
+-},1000/30);
+-const heartbeat=setInterval(()=>{for(const ws of wss.clients){if(!ws.alive){ws.terminate();continue;}ws.alive=false;ws.ping();}},15000);
+-const port=Number(process.env.PORT)||7860;
+-server.listen(port,'0.0.0.0',()=>console.log(`DEADLOCK: Kernel Wars • http://localhost:${port}`));
+-function shutdown(){clearInterval(tick);clearInterval(heartbeat);for(const ws of wss.clients)ws.terminate();wss.close();server.close();}
+-process.on('SIGTERM',shutdown);process.on('SIGINT',shutdown);
++
++function handleMessage(ws, raw, isBinary) {
++  if (Date.now() - ws.window > 1000) {ws.window = Date.now(); ws.count = 0;}
++  if (++ws.count > 90) return;
++  if (isBinary) {reject(ws); return;}
++  let msg; try {msg = JSON.parse(raw);} catch {reject(ws); return;}
++  if (!msg || typeof msg !== 'object' || typeof msg.type !== 'string') {reject(ws); return;}
++  if (msg.type === 'ping') {
++    if (Number.isFinite(msg.rtt)) ws.rtt = Math.max(0, Math.min(10000, msg.rtt));
++    send(ws, {type: 'pong', at: msg.at}); return;
++  }
++  if (msg.type === 'leave') {leave(ws); return;}
++  if (msg.type === 'resume' && !ws.room) {ws.proto = msg.proto === 2 ? 2 : 1; resume(ws, msg); return;}
++  if (msg.type === 'create' || msg.type === 'join' || msg.type === 'spectate') {
++    if (ws.room) return;
++    ws.proto = msg.proto === 2 ? 2 : 1;
++    let room, code;
++    if (msg.type === 'create') {
++      if (rooms.size >= 100) {send(ws, {type: 'error', message: 'Server penuh. Coba beberapa saat lagi.'}); return;}
++      code = randomBytes(3).toString('hex').toUpperCase();
++      while (rooms.has(code)) code = randomBytes(3).toString('hex').toUpperCase();
++      room = newRoom(ws, code); rooms.set(code, room);
++    } else {code = String(msg.code || '').toUpperCase(); room = rooms.get(code);}
++    if (!room) {send(ws, {type: 'error', message: 'Room tidak ditemukan. Periksa kode undangan.'}); return;}
++    if (msg.type === 'spectate') {
++      if (room.spectators.size + [...room.pending.values()].filter(p => p.spectating).length >= 20) {send(ws, {type: 'error', message: 'Slot penonton penuh (maksimal 20).'}); return;}
++      room.spectators.set(ws.id, ws); ws.room = code; ws.spectating = true;
++      joined(ws, room); return;
++    }
++    if (room.game.phase === 'finished') {send(ws, {type: 'error', message: 'Pertandingan sudah selesai. Buat room baru.'}); return;}
++    const humans = [0, 1].map(t => room.game.players.filter(p => p.team === t && !p.bot).length);
++    const team = humans[0] <= humans[1] ? 0 : 1;
++    if (humans[team] >= 5) {send(ws, {type: 'error', message: 'Room penuh: maksimal 10 pemain.'}); return;}
++    const bot = room.game.players.find(p => p.bot && p.team === team); if (bot) room.game.removePlayer(bot.id);
++    const player = room.game.addPlayer(ws.id, typeof msg.name === 'string' ? msg.name : undefined, typeof msg.role === 'string' ? msg.role : undefined, team);
++    if (!player) {send(ws, {type: 'error', message: 'Tim penuh.'}); return;}
++    room.clients.set(ws.id, ws); ws.room = code;
++    joined(ws, room); return;
++  }
++  const room = rooms.get(ws.room); if (!room || ws.spectating) return;
++  if (msg.type === 'input') room.game.input(ws.id, sanitizeInput(msg.input), msg.seq);
++  else if (msg.type === 'rematch' && room.host === ws.id) room.game.rematch();
++  else if (msg.type === 'start' && room.host === ws.id && room.game.phase === 'lobby') {
++    if (!msg.bots && room.clients.size < 2) {send(ws, {type: 'error', message: 'Butuh minimal 2 pemain, atau aktifkan bot.'}); return;}
++    room.game.start(msg.bots !== false);
++  }
++}
++
++// ---------- per-room broadcast ----------
++function broadcast(room, now) {
++  const game = room.game;
++  refreshRoomMeta(room);
++  const rosterChanged = room.rosterDirty, metaChanged = room.metaDirty;
++  room.rosterDirty = room.metaDirty = false;
++  const everyone = [...room.clients.values(), ...room.spectators.values()];
++  const v2 = everyone.filter(ws => ws.proto === 2);
++  if (rosterChanged) for (const ws of v2) send(ws, room.rosterMsg);
++  if (metaChanged) for (const ws of v2) send(ws, room.metaMsg);
++  // New feed events go out once, reliably. (Event ids restart when a rematch builds a fresh Game.)
++  const newest = game.events.length ? game.events[game.events.length - 1].id : 0;
++  let reset = false;
++  if (newest < room.lastEventId) {room.lastEventId = 0; reset = true;}
++  const fresh = game.events.filter(e => e.id > room.lastEventId);
++  if (fresh.length || reset) {room.lastEventId = Math.max(room.lastEventId, newest); const msg = JSON.stringify({type: 'events', reset, events: fresh}); for (const ws of v2) send(ws, msg);}
++
++  room.frame++;
++  const phaseChanged = game.phase !== room.lastPhase; room.lastPhase = game.phase;
++  const due = game.phase === 'playing' || phaseChanged || rosterChanged || metaChanged || now - room.lastSentAt >= LOBBY_INTERVAL;
++  if (!due) return;
++  room.lastSentAt = now;
++  const force = phaseChanged || rosterChanged || metaChanged;
++  const spectatorTurn = force || room.frame % (degraded ? DEGRADED_STRIDE : SPECTATOR_STRIDE) === 0;
++  // Serialize once per wire format, then hand the same buffer to every recipient.
++  let binary = null, json = null;
++  const encodeBinary = () => binary ||= encodeState(game, room.rv);
++  const encodeJson = () => json ||= JSON.stringify({type: 'state', state: game.snapshot(), host: room.host, spectators: room.spectators.size});
++  for (const ws of room.clients.values()) {
++    if (!force && ws.rtt > SLOW_RTT_MS && room.frame % 2) continue;      // very slow link (client-reported RTT): halve its rate
++    sendFrame(ws, ws.proto === 2 ? encodeBinary() : encodeJson());
++  }
++  if (spectatorTurn) for (const ws of room.spectators.values()) sendFrame(ws, ws.proto === 2 ? encodeBinary() : encodeJson());
++}
++
++// ---------- drift-corrected 30 Hz loop ----------
++// setInterval(…, 1000/30) truncates to 33 ms (30.3 Hz) and drifts; schedule against an absolute clock instead.
++let nextTick = performance.now() + TICK_MS, timer = null, stopped = false;
++function loop() {
++  if (stopped) return;
++  const started = performance.now();
++  metrics.maxLagMs = Math.max(metrics.maxLagMs * .999, started - nextTick);   // how late this tick started
++  for (const room of [...rooms.values()]) {
++    try {
++      expire(room); if (!rooms.has(room.code)) continue;
++      const t0 = performance.now();
++      room.game.update(1 / 30);
++      broadcast(room, Date.now());
++      room.ema = room.ema * .9 + (performance.now() - t0) * .1;
++    } catch (err) {metrics.errors++; console.error('room tick error:', err?.stack || err);}
++  }
++  const spent = performance.now() - started;
++  ring[metrics.ticks++ % ring.length] = spent;
++  if (spent > TICK_MS) metrics.overruns++;
++  loadEma = loadEma * .9 + spent * .1;
++  if (!degraded && loadEma > 18) degraded = true; else if (degraded && loadEma < 12) degraded = false;
++  const stamp = Date.now();
++  if (!metrics.window.length || stamp - metrics.window[metrics.window.length - 1].t >= 1000) {metrics.window.push({t: stamp, bytes: metrics.lastBytes}); metrics.lastBytes = 0; if (metrics.window.length > 10) metrics.window.shift();}
++  nextTick += TICK_MS;
++  const now = performance.now();
++  if (now - nextTick > TICK_MS * 3) nextTick = now;     // far behind: skip ahead instead of spiralling
++  timer = setTimeout(loop, Math.max(0, nextTick - now));
++}
++timer = setTimeout(loop, TICK_MS);
++const heartbeat = setInterval(() => {for (const ws of wss.clients) {if (!ws.alive) {ws.terminate(); continue;} ws.alive = false; ws.ping();}}, 15000);
++const port = Number(process.env.PORT) || 7860;
++server.listen(port, '0.0.0.0', () => console.log(`DEADLOCK: Kernel Wars • http://localhost:${port}`));
++function shutdown() {stopped = true; clearTimeout(timer); clearInterval(heartbeat); for (const ws of wss.clients) ws.terminate(); wss.close(); server.close();}
++process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
+diff -ruN '--exclude=node_modules' '--exclude=tools' '--exclude=evaluation' '--exclude=vendor' '--exclude=artifacts' '--exclude=package-lock.json' a/shared/codec.js ./shared/codec.js
+--- a/shared/codec.js	1970-01-01 00:00:00.000000000 +0000
++++ ./shared/codec.js	2026-10-06 11:03:53.305842735 +0000
+@@ -0,0 +1,119 @@
++// Deadlock v1.3 wire format ("proto 2").
++//
++// v1.2 sent the whole game state as JSON (~5.3 KB) to every client 30 times a second.
++// v1.3 splits it into three message kinds:
++//   roster  (JSON, reliable) static per-player data: id, name, role, team, bot, maxHp. Sent when it changes.
++//   events  (JSON, reliable) only the new feed events.
++//   state   (binary, droppable) everything that changes every tick, quantized, ~250 bytes for a 5v5 room.
++//
++// Layout (little endian). Header = 29 bytes:
++//   0 u8 kind(1)   1 u8 flags   2 u8 rosterVersion   3 u8 playerCount   4 u16 tick   6 u16 time*100
++//   8 u16 score0   10 u16 score1   12..15 u8 resource owner (player index + 1, 0 = free)
++//   16 i8 uplink progress*100   17 u8 uplink owner (0 none, 1 team0, 2 team1)   18 u16 uplink next*10
++//   20 u8 winner code   21 u16 deadlocks   23 u16 recoveries   25 u16 deliveries   27 u8 bulletCount   28 u8 cycleCount
++// then playerCount * 19 bytes, bulletCount * 10 bytes, then cycles (u8 length + u8 player indexes each).
++import {NODES} from './game.js';
++
++export const PROTO = 2;
++export const HEADER = 29, PLAYER_BYTES = 19, BULLET_BYTES = 10;
++const POS = 50, TAU = Math.PI * 2, PHASES = ['lobby', 'playing', 'finished'];
++const u8 = (v, max = 255) => Math.max(0, Math.min(max, Math.round(v)));
++const ceil8 = (v) => Math.max(0, Math.min(255, Math.ceil(v - 1e-9)));
++const i16 = (v) => Math.max(-32768, Math.min(32767, Math.round(v * POS)));
++const angleToU16 = (a) => Math.round((((a % TAU) + TAU) % TAU) / TAU * 65535);
++const angleToU8 = (a) => Math.round((((a % TAU) + TAU) % TAU) / TAU * 255) & 255;
++
++export function rosterOf(game) {
++  return game.players.map(p => ({id: p.id, name: p.name, role: p.role, team: p.team, bot: !!p.bot, maxHp: p.maxHp}));
++}
++export const rosterSignature = (game) => game.players.map(p => p.id).join('|');
++
++export function encodeState(game, rosterVersion) {
++  const players = game.players, bullets = game.bullets.slice(0, 255), cycles = game.cycles.slice(0, 255);
++  const index = new Map(players.map((p, i) => [p.id, i]));
++  let cycleBytes = 0; for (const c of cycles) cycleBytes += 1 + Math.min(c.length, 255);
++  const buffer = new Uint8Array(HEADER + players.length * PLAYER_BYTES + bullets.length * BULLET_BYTES + cycleBytes);
++  const v = new DataView(buffer.buffer);
++  const u = game.uplink;
++  v.setUint8(0, 1);
++  v.setUint8(1, Math.max(0, PHASES.indexOf(game.phase)) | (game.blitz ? 4 : 0) | (u.active ? 8 : 0) | (u.contested ? 16 : 0));
++  v.setUint8(2, rosterVersion & 255); v.setUint8(3, players.length);
++  v.setUint16(4, game.tick & 0xFFFF, true);
++  v.setUint16(6, Math.min(65535, Math.ceil(game.time * 100 - 1e-6)), true);
++  v.setUint16(8, Math.min(65535, game.scores[0]), true); v.setUint16(10, Math.min(65535, game.scores[1]), true);
++  game.resources.forEach((r, i) => v.setUint8(12 + i, r.owner && index.has(r.owner) ? index.get(r.owner) + 1 : 0));
++  v.setInt8(16, Math.max(-100, Math.min(100, Math.round(u.progress * 100))));
++  v.setUint8(17, u.owner === null || u.owner === undefined ? 0 : u.owner + 1);
++  v.setUint16(18, Math.min(65535, Math.ceil(u.next * 10 - 1e-6)), true);
++  v.setUint8(20, game.winner === undefined ? 0 : game.winner + 2);
++  v.setUint16(21, Math.min(65535, game.stats.deadlocks), true); v.setUint16(23, Math.min(65535, game.stats.recoveries), true); v.setUint16(25, Math.min(65535, game.stats.deliveries), true);
++  v.setUint8(27, bullets.length); v.setUint8(28, cycles.length);
++  const resIndex = new Map(game.resources.map((r, i) => [r.id, i + 1]));
++  let o = HEADER;
++  for (const p of players) {
++    v.setInt16(o, i16(p.x), true); v.setInt16(o + 2, i16(p.z), true); v.setUint16(o + 4, angleToU16(p.angle), true);
++    v.setUint8(o + 6, ceil8(p.hp)); v.setUint8(o + 7, ceil8(p.respawn * 40));
++    v.setUint8(o + 8, (resIndex.get(p.held[0]) || 0) | ((resIndex.get(p.held[1]) || 0) << 3));
++    v.setUint8(o + 9, (resIndex.get(p.waiting) || 0) | (p.deadlocked ? 8 : 0) | (p.disconnected ? 16 : 0));
++    v.setUint8(o + 10, ceil8(p.shield * 20)); v.setUint8(o + 11, ceil8(p.boost * 40));
++    v.setUint8(o + 12, ceil8(p.skillCd * 20)); v.setUint8(o + 13, ceil8(p.dashCd * 50));
++    v.setUint8(o + 14, u8(p.kills)); v.setUint8(o + 15, u8(p.deliveries)); v.setUint8(o + 16, u8(p.recoveries));
++    v.setUint16(o + 17, game.ack(p), true);
++    o += PLAYER_BYTES;
++  }
++  for (const b of bullets) {
++    v.setUint32(o, b.id >>> 0, true); v.setInt16(o + 4, i16(b.x), true); v.setInt16(o + 6, i16(b.z), true);
++    v.setUint8(o + 8, angleToU8(Math.atan2(b.dx, b.dz))); v.setUint8(o + 9, b.team);
++    o += BULLET_BYTES;
++  }
++  for (const c of cycles) {
++    const ids = c.slice(0, 255); v.setUint8(o++, ids.length);
++    for (const id of ids) v.setUint8(o++, index.get(id) ?? 255);
++  }
++  return buffer;
++}
++
++// Returns a state object shaped like Game.snapshot() (events are filled in by the caller),
++// {stale:true, rv} when the roster for this version has not arrived yet, or null for a malformed frame.
++export function decodeState(bytes, roster, rosterVersion) {
++  if (!bytes || bytes.length < HEADER || bytes[0] !== 1) return null;
++  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
++  const n = v.getUint8(3), nb = v.getUint8(27), nc = v.getUint8(28), rv = v.getUint8(2);
++  if (bytes.length < HEADER + n * PLAYER_BYTES + nb * BULLET_BYTES) return null;
++  if (rv !== (rosterVersion & 255) || !roster || roster.length !== n) return {stale: true, rv};
++  const flags = v.getUint8(1);
++  const ids = NODES.map(r => r.id);
++  const players = [];
++  let o = HEADER;
++  for (let i = 0; i < n; i++, o += PLAYER_BYTES) {
++    const r = roster[i], held = v.getUint8(o + 8), wait = v.getUint8(o + 9);
++    players.push({id: r.id, name: r.name, role: r.role, team: r.team, bot: r.bot, maxHp: r.maxHp,
++      x: v.getInt16(o, true) / POS, z: v.getInt16(o + 2, true) / POS, angle: v.getUint16(o + 4, true) / 65535 * TAU,
++      hp: v.getUint8(o + 6), respawn: v.getUint8(o + 7) / 40,
++      held: [held & 7, (held >> 3) & 7].filter(Boolean).map(k => ids[k - 1]), waiting: (wait & 7) ? ids[(wait & 7) - 1] : null,
++      deadlocked: !!(wait & 8), disconnected: !!(wait & 16),
++      shield: v.getUint8(o + 10) / 20, boost: v.getUint8(o + 11) / 40, skillCd: v.getUint8(o + 12) / 20, dashCd: v.getUint8(o + 13) / 50,
++      kills: v.getUint8(o + 14), deliveries: v.getUint8(o + 15), recoveries: v.getUint8(o + 16), ack: v.getUint16(o + 17, true)});
++  }
++  const bullets = [];
++  for (let i = 0; i < nb; i++, o += BULLET_BYTES) {
++    const a = v.getUint8(o + 8) / 255 * TAU;
++    bullets.push({id: v.getUint32(o, true), x: v.getInt16(o + 4, true) / POS, z: v.getInt16(o + 6, true) / POS, dx: Math.sin(a) * 30, dz: Math.cos(a) * 30, team: v.getUint8(o + 9)});
++  }
++  const cycles = [];
++  for (let i = 0; i < nc && o < bytes.length; i++) {
++    const len = v.getUint8(o++), cycle = [];
++    for (let k = 0; k < len && o < bytes.length; k++) {const idx = v.getUint8(o++); if (players[idx]) cycle.push(players[idx].id);}
++    cycles.push(cycle);
++  }
++  const owner = v.getUint8(17), winner = v.getUint8(20);
++  return {
++    players, bullets, cycles, events: [],
++    resources: NODES.map((r, i) => ({...r, owner: v.getUint8(12 + i) ? players[v.getUint8(12 + i) - 1]?.id ?? null : null})),
++    scores: [v.getUint16(8, true), v.getUint16(10, true)], time: v.getUint16(6, true) / 100,
++    phase: PHASES[flags & 3] || 'lobby', tick: v.getUint16(4, true), blitz: !!(flags & 4),
++    stats: {deadlocks: v.getUint16(21, true), recoveries: v.getUint16(23, true), deliveries: v.getUint16(25, true)},
++    winner: winner ? winner - 2 : undefined,
++    uplink: {active: !!(flags & 8), contested: !!(flags & 16), owner: owner ? owner - 1 : null, progress: v.getInt8(16) / 100, next: v.getUint16(18, true) / 10, pulse: 0},
++  };
++}
+diff -ruN '--exclude=node_modules' '--exclude=tools' '--exclude=evaluation' '--exclude=vendor' '--exclude=artifacts' '--exclude=package-lock.json' a/shared/game.js ./shared/game.js
+--- a/shared/game.js	2026-10-05 08:45:02.000000000 +0000
++++ ./shared/game.js	2026-10-06 11:03:28.982427551 +0000
+@@ -22,6 +22,26 @@
+ ];
+ export const distance = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
+ const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
++// v1.3: movement is a pure function shared by the server (authority) and the client (prediction).
++export function moveEntity(p, dx, dz) {
++  const valid = (x,z) => !WALLS.some(w => Math.abs(x-w.x) < w.w/2+.65 && Math.abs(z-w.z) < w.d/2+.65);
++  const x = clamp(p.x+dx, -ARENA.width/2+1,ARENA.width/2-1), z = clamp(p.z+dz,-ARENA.depth/2+1,ARENA.depth/2-1);
++  if (valid(x,p.z)) p.x=x;
++  if (valid(p.x,z)) p.z=z;
++}
++// One 1/30 s step of the movement-relevant part of Game.update() for a single player.
++// m = {x,z,role,boost,dashCd,skillCd,waiting,canAct}; input = {x,z,dash,skill}.
++export function stepMover(m, input, dt) {
++  for (const k of ['skillCd','dashCd','boost']) m[k] = Math.max(0, m[k]-dt);
++  if (!m.canAct) return m;
++  if (input.skill && m.skillCd <= 0) {m.skillCd = CLASSES[m.role].cooldown; if (m.role === 'runner') m.boost = 2.5;}
++  if (m.waiting) return m;
++  const dx = clamp(Number(input.x)||0,-1,1), dz = clamp(Number(input.z)||0,-1,1), len = Math.max(1, Math.hypot(dx,dz));
++  let speed = CLASSES[m.role].speed*(m.boost>0?1.6:1);
++  if (input.dash && m.dashCd <= 0) {m.dashCd = 4; m.boost = .35; speed *= 3;}
++  moveEntity(m, dx/len*speed*dt, dz/len*speed*dt);
++  return m;
++}
+ export function clearPath(a,b) {
+   return !WALLS.some(w=>{
+     let lo=0,hi=1;
+@@ -154,7 +174,7 @@
+     }
+     this.event(`${p.name} · ${CLASSES[p.role].skill}`, 'skill', p);
+   }
+-  input(id, input) {
++  input(id, input, seq) {
+     const p = this.players.find(p => p.id === id);
+     if (!p || p.bot || p.disconnected || this.phase !== 'playing') return;
+     p.input = {x: clamp(Number(input.x) || 0, -1, 1), z: clamp(Number(input.z) || 0, -1, 1),
+@@ -162,13 +182,9 @@
+       interact: p.input.interact || !!input.interact, rollback: p.input.rollback || !!input.rollback,
+       skill: p.input.skill || !!input.skill, dash: p.input.dash || !!input.dash};
+     p.lastInput = this.tick;
++    if (Number.isInteger(seq) && seq >= 0 && seq <= 0xFFFF) {p.inputSeq = seq; p.inputTick = this.tick;}
+   }
+-  move(p, dx, dz) {
+-    const valid = (x,z) => !WALLS.some(w => Math.abs(x-w.x) < w.w/2+.65 && Math.abs(z-w.z) < w.d/2+.65);
+-    const x = clamp(p.x+dx, -ARENA.width/2+1,ARENA.width/2-1), z = clamp(p.z+dz,-ARENA.depth/2+1,ARENA.depth/2-1);
+-    if (valid(x,p.z)) p.x=x;
+-    if (valid(p.x,z)) p.z=z;
+-  }
++  move(p, dx, dz) {moveEntity(p, dx, dz);}
+   ai(p, dt) {
+     p.aiTime += dt;
+     const enemies = this.players.filter(e => e.team !== p.team && !e.respawn && !e.disconnected);
+@@ -281,8 +297,11 @@
+       this.event('Match selesai. Lihat laporan proses.', 'finish');
+     }
+   }
++  // Last client input sequence the server has applied for p (0xFFFF = none yet).
++  // Unchanged inputs are not re-sent by v1.3 clients, so the server assumes the same input stays in force.
++  ack(p) {return p.inputSeq === undefined ? 0xFFFF : (p.inputSeq + (this.tick - p.inputTick) - 1) & 0xFFFF;}
+   snapshot() {
+-    return {players:this.players.map(({input,aiTime,lastInput,navGoal,navPath,...p})=>p), resources:this.resources,
++    return {players:this.players.map(({input,aiTime,lastInput,navGoal,navPath,inputSeq,inputTick,...p})=>p), resources:this.resources,
+       bullets:this.bullets,events:this.events,cycles:this.cycles,scores:this.scores,time:this.time,
+       phase:this.phase,tick:this.tick,stats:this.stats,winner:this.winner,uplink:this.uplink,blitz:this.blitz};
+   }
+diff -ruN '--exclude=node_modules' '--exclude=tools' '--exclude=evaluation' '--exclude=vendor' '--exclude=artifacts' '--exclude=package-lock.json' a/src/app.js ./src/app.js
+--- a/src/app.js	2026-10-05 08:46:22.000000000 +0000
++++ ./src/app.js	2026-10-06 11:07:13.190564068 +0000
+@@ -1,10 +1,16 @@
+ import {Arena} from './arena.js';
+ import {Game, ARENA, BASES, CLASSES, NODES, WALLS, UPLINK, distance} from '../shared/game.js';
++import {decodeState} from '../shared/codec.js';
++import {SnapshotBuffer, Predictor, Telemetry, InputGate} from './netcode.js';
++import {initSidebar} from './sidebar.js';
+ const $=s=>document.querySelector(s), esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ let arena;try{arena=new Arena($('#scene'));}catch(e){$('#scene').innerHTML='<div style="padding:120px 6%;color:#e7b48c">WebGL tidak tersedia. Aktifkan akselerasi grafis browser untuk melihat arena 3D.</div>';console.error(e);}
+ let role='runner',mode='menu',localGame=null,state=null,myId=null,socket=null,online=false,roomCode='',hostId='',lastHud=0,lastFrame=performance.now(),accumulator=0;
+ let modalKind='',mouse={x:innerWidth/2,y:innerHeight/2,down:false,moved:false},keys=new Set(),pending={},touch={x:0,z:0,fire:false},lastFeed='',lastRoster='',lastSound=0,muted=true,audioContext=null,ping=0,resultsShown=false;
+ let spectating=false,viewerCount=0,followId='',watchRoster='';
++// v1.3 netcode state: wire roster, feed events, interpolation buffer, client prediction, input gate, telemetry
++const buffer=new SnapshotBuffer(),predictor=new Predictor(),telemetry=new Telemetry(),gate=new InputGate();
++let roster=[],rosterV=-1,eventLog=[],aimAngle=0,rosterWaits=0;
+ let resumeSession=null,lastMessage=Date.now();
+ try{resumeSession=JSON.parse(sessionStorage.getItem('deadlock-session')||'null');}catch{}
+ function saveSession(value){resumeSession=value;try{if(value)sessionStorage.setItem('deadlock-session',JSON.stringify(value));else sessionStorage.removeItem('deadlock-session');}catch{}}
+@@ -17,22 +23,21 @@
+ function connect(){
+   const port=/^\/deadlock(?:\/|$)/.test(location.pathname)?`${location.hostname}:7860`:location.host;
+   const url=`${location.protocol==='https:'?'wss':'ws'}://${port}/ws`;
+-  try{socket=new WebSocket(url);}catch{connectionStatus(false);return;}
+-  socket.addEventListener('open',()=>{lastMessage=Date.now();connectionStatus(true);if(resumeSession)send({type:'resume',...resumeSession});});
++  try{socket=new WebSocket(url);socket.binaryType='arraybuffer';}catch{connectionStatus(false);return;}
++  socket.addEventListener('open',()=>{lastMessage=Date.now();connectionStatus(true);if(resumeSession)send({type:'resume',proto:2,...resumeSession});});
+   socket.addEventListener('message',e=>{
+-    lastMessage=Date.now();let msg;try{msg=JSON.parse(e.data);}catch{return;}
++    lastMessage=Date.now();
++    if(typeof e.data!=='string'){onFrame(new Uint8Array(e.data));return;}
++    telemetry.down(e.data.length,performance.now(),false);let msg;try{msg=JSON.parse(e.data);}catch{return;}
++    if(msg.type==='roster'){roster=msg.players;rosterV=msg.v;return;}
++    if(msg.type==='meta'){hostId=msg.host;viewerCount=msg.spectators||0;if(modalKind==='lobby'&&state)lobbyUpdate();return;}
++    if(msg.type==='events'){mergeEvents(msg);return;}
+     if(msg.type==='pong'){ping=Math.round(Date.now()-msg.at);return;}
+     if(msg.type==='error'){toast(msg.message);return;}
+     if(msg.type==='resume_failed'){leaveMatch(false);rooms();toast(msg.message);return;}
+     if(msg.type==='room_closed'){leaveMatch(false);toast(msg.message);return;}
+-    if(msg.type==='joined'){saveSession({code:msg.code,token:msg.token});$('#connection-banner').classList.add('hidden');if(msg.resumed&&mode==='online'&&state){toast('Terhubung kembali. Lanjutkan pertempuran!');return;}spectating=!!msg.spectator;viewerCount=0;followId='';watchRoster='';myId=msg.id;roomCode=msg.code;mode='lobby';lastRoster='';modalKind='lobby';lobby();return;}
+-    if(msg.type==='state'){
+-      if(mode!=='lobby'&&mode!=='online')return;
+-      state=msg.state;hostId=msg.host;viewerCount=msg.spectators||0;
+-      if(state.phase==='lobby'){if(mode==='online'){mode='lobby';resultsShown=false;lastRoster='';$('#hud').classList.add('hidden');lobby();}lobbyUpdate();}
+-      else if(mode==='lobby'){beginMatch('online');}
+-      if(modalKind==='result'&&mode==='online')updateRematchButton();
+-    }
++    if(msg.type==='joined'){saveSession({code:msg.code,token:msg.token});$('#connection-banner').classList.add('hidden');buffer.clear();predictor.reset();gate.reset();eventLog=[];roster=[];rosterV=-1;if(msg.resumed&&mode==='online'&&state){toast('Terhubung kembali. Lanjutkan pertempuran!');return;}spectating=!!msg.spectator;viewerCount=0;followId='';watchRoster='';myId=msg.id;roomCode=msg.code;mode='lobby';lastRoster='';modalKind='lobby';lobby();return;}
++    if(msg.type==='state'){applyState(msg.state,msg.host,msg.spectators||0);return;}
+   });
+   socket.addEventListener('close',()=>{
+     connectionStatus(false);
+@@ -41,15 +46,40 @@
+   });
+   socket.addEventListener('error',()=>connectionStatus(false));
+ }
++function applyState(next,host,viewers){
++  if(mode!=='lobby'&&mode!=='online')return;
++  state=next;if(host!==undefined){hostId=host;viewerCount=viewers;}
++  if(state.phase==='lobby'){if(mode==='online'){mode='lobby';resultsShown=false;lastRoster='';$('#hud').classList.add('hidden');predictor.reset();gate.reset();lobby();}lobbyUpdate();}
++  else if(mode==='lobby'){beginMatch('online');}
++  if(modalKind==='result'&&mode==='online')updateRematchButton();
++}
++// Binary state frame (protocol 2): decode against the roster, store for interpolation, reconcile prediction.
++function onFrame(bytes){
++  const decoded=decodeState(bytes,roster,rosterV);
++  telemetry.down(bytes.length,performance.now(),!!decoded&&!decoded.stale);
++  if(!decoded||decoded.stale){if(decoded?.stale)rosterWaits++;return;}
++  decoded.events=eventLog;
++  buffer.push(decoded,performance.now());
++  applyState(decoded);
++  const me=!spectating&&mode==='online'?decoded.players.find(p=>p.id===myId):null;
++  if(me)predictor.reconcile(me,decoded.phase==='playing');
++}
++function mergeEvents(msg){
++  if(msg.reset)eventLog=[];
++  const known=new Set(eventLog.map(e=>e.id));
++  eventLog=[...eventLog,...msg.events.filter(e=>!known.has(e.id))].slice(-12);
++  if(state)state.events=eventLog;
++}
+ function connectionStatus(value){online=value;$('#server-dot').classList.toggle('offline',!value);$('#server-status').textContent=value?'SERVER ONLINE':'PRACTICE READY';const notice=$('#room-network-note');if(notice)notice.textContent=value?'Server terhubung · WebSocket real time · 30 tick/s':'Server belum terhubung. Jalankan npm start. Mode latihan tetap tersedia.';}
+-connect();setInterval(()=>{if(online){if(Date.now()-lastMessage>12000){socket.close();return;}send({type:'ping',at:Date.now()});}},3000);
++connect();setInterval(()=>{if(online){if(Date.now()-lastMessage>12000){socket.close();return;}send({type:'ping',at:Date.now(),rtt:ping});}},3000);
++setInterval(()=>{const stale=online&&['online','lobby'].includes(mode)&&Date.now()-lastMessage>(mode==='online'?1000:2500);const w=$('#net-warning');w.classList.toggle('hidden',!stale);if(stale)w.querySelector('b').textContent=`${((Date.now()-lastMessage)/1000).toFixed(1)}s`;},250);
+ function modal(content,kind='info'){$('#modal-content').innerHTML=content;$('#modal-backdrop').classList.remove('hidden');modalKind=kind;keys.clear();mouse.down=false;$('#close-modal').focus();}
+ function closeModal(){if(modalKind==='lobby'&&mode==='lobby'){leaveMatch();return;}$('#modal-backdrop').classList.add('hidden');modalKind='';keys.clear();}
+ $('#close-modal').addEventListener('click',()=>{if(modalKind==='result'){leaveMatch();return;}closeModal();});
+ $('#modal-backdrop').addEventListener('click',e=>{if(e.target===$('#modal-backdrop')&&!['lobby','result'].includes(modalKind))closeModal();});
+ function rooms(watch=false){
+   modal(`<div class="overline">MULTIPLAYER / PRIVATE ROOM</div><h2 id="modal-title">Satu room. Dua tim.</h2><p class="intro">Ajak hingga 10 teman. Bagikan kode room dan bergabung ke server yang sama. Tim dibagi otomatis, maksimal 5 operator per tim.</p><label for="operator-name">NAMA OPERATOR</label><input id="operator-name" type="text" maxlength="16" value="${esc(name)}" placeholder="Nama kamu"><div class="room-actions"><div><h3>Buat arena</h3><p>Jadilah host dan atur waktu mulai.</p><button id="create-room" class="button primary">BUAT ROOM <span>↗</span></button></div><div><h3>Gabung atau menonton</h3><input id="join-code" type="text" maxlength="6" placeholder="KODE ROOM" autocomplete="off"><button id="join-room" class="button secondary">GABUNG ROOM <span>→</span></button><button id="watch-room" class="button secondary">◉ TONTON SAJA</button><p>Maks. 20 penonton, terpisah dari 10 pemain.</p></div></div><p id="room-network-note" class="intro" style="font-size:10px">${online?'Server terhubung · WebSocket real time · 30 tick/s':'Server belum terhubung. Jalankan npm start lalu buka http://localhost:7860. Mode latihan tetap tersedia.'}</p>`,'rooms');
+-  const join=(type)=>{if(!online){toast('Server belum aktif. Jalankan npm start untuk multiplayer.');return;}name=$('#operator-name').value.trim()||'Operator';try{localStorage.setItem('deadlock-name',name);}catch{}const code=$('#join-code').value.trim();if(type!=='create'&&!/^[a-f0-9]{6}$/i.test(code)){toast('Masukkan kode room 6 karakter.');return;}send({type,name,role,code});};
++  const join=(type)=>{if(!online){toast('Server belum aktif. Jalankan npm start untuk multiplayer.');return;}name=$('#operator-name').value.trim()||'Operator';try{localStorage.setItem('deadlock-name',name);}catch{}const code=$('#join-code').value.trim();if(type!=='create'&&!/^[a-f0-9]{6}$/i.test(code)){toast('Masukkan kode room 6 karakter.');return;}send({type,name,role,code,proto:2});};
+   $('#create-room').onclick=()=>join('create');$('#join-room').onclick=()=>join('join');$('#watch-room').onclick=()=>join('spectate');$('#join-code').onkeydown=e=>{if(e.key==='Enter')join(watch?'spectate':'join');};
+   const invite=new URLSearchParams(location.search).get('room');if(invite)$('#join-code').value=invite.toUpperCase();if(watch){$('#modal-title').textContent='Saksikan perang kernel.';$('#watch-room').classList.replace('secondary','primary');$('#join-code').focus();}
+ }
+@@ -59,9 +89,9 @@
+   $('#start-match').onclick=()=>send({type:'start',bots:$('#fill-bots').checked});
+ }
+ function lobbyUpdate(){if(modalKind!=='lobby')return;$('#lobby-viewers').textContent=`◉ ${viewerCount}/20 penonton · ${spectating?'Kamu hanya menonton. Slot pemain tidak berkurang.':'Penonton dapat masuk dengan kode room yang sama.'}`;const signature=state.players.map(p=>p.id).join()+hostId;if(signature===lastRoster)return;lastRoster=signature;for(let t=0;t<2;t++){const list=state.players.filter(p=>p.team===t);$(`#count-${t?'b':'a'}`).textContent=`${list.length}/5`;$(`#roster-${t?'b':'a'}`).innerHTML=Array.from({length:5},(_,i)=>list[i]?`<div class="lobby-player">${esc(list[i].name)}${list[i].id===myId?' •':''}<span>${CLASSES[list[i].role].name.toUpperCase()}</span></div>`:'<div class="lobby-player empty">Menunggu operator…<span>OPEN SLOT</span></div>').join('');}const host=!spectating&&hostId===myId;$('#start-match').disabled=!host;$('#fill-bots').disabled=!host;$('#start-match').classList.toggle('hidden',spectating);$('.checkbox-label').classList.toggle('hidden',spectating);$('#host-note').textContent=host?'Kamu adalah host. Mulai saat tim siap.':'Menunggu host memulai pertandingan.';}
+-function beginMatch(nextMode){mode=nextMode;resultsShown=false;lastFeed='';lastSound=0;$('#modal-backdrop').classList.add('hidden');modalKind='';$('#menu').classList.add('hidden');$('#hud').classList.remove('hidden');document.body.classList.add('in-game');arena?.setMode(false);if(spectating)watchPlayer('');document.body.classList.toggle('spectating',spectating);$('#spectator-bar').classList.toggle('hidden',!spectating);keys.clear();pending={};touch={x:0,z:0,fire:false};arena&&(arena.eventId=0);$('#match-mode').textContent=nextMode==='local'?'PRACTICE · 5V5':`ROOM ${roomCode} · ${spectating?'PENONTON':'5V5'}`;toast(spectating?'Pilih seluruh arena atau ikuti operator. Kamu hanya menonton.':'Kunci 2 resource dengan E, lalu kembali ke core timmu dan tekan E.');}
++function beginMatch(nextMode){predictor.reset();gate.reset();mode=nextMode;resultsShown=false;lastFeed='';lastSound=0;$('#modal-backdrop').classList.add('hidden');modalKind='';$('#menu').classList.add('hidden');$('#hud').classList.remove('hidden');document.body.classList.add('in-game');arena?.setMode(false);if(spectating)watchPlayer('');document.body.classList.toggle('spectating',spectating);$('#spectator-bar').classList.toggle('hidden',!spectating);keys.clear();pending={};touch={x:0,z:0,fire:false};arena&&(arena.eventId=0);$('#match-mode').textContent=nextMode==='local'?'PRACTICE · 5V5':`ROOM ${roomCode} · ${spectating?'PENONTON':'5V5'}`;toast(spectating?'Pilih seluruh arena atau ikuti operator. Kamu hanya menonton.':'Kunci 2 resource dengan E, lalu kembali ke core timmu dan tekan E.');}
+ $('#play-practice').onclick=()=>{if(!arena){toast('WebGL diperlukan. Aktifkan akselerasi grafis browser.');return;}spectating=false;viewerCount=0;localGame=new Game();myId='you';localGame.addPlayer(myId,name,role,0);localGame.start(true);state=localGame.snapshot();beginMatch('local');};
+-function leaveMatch(notify=true){saveSession(null);$('#connection-banner').classList.add('hidden');if(notify&&(mode==='online'||mode==='lobby'))send({type:'leave'});localGame=null;myId=null;state=null;mode='menu';roomCode='';resultsShown=false;$('#modal-backdrop').classList.add('hidden');modalKind='';$('#hud').classList.add('hidden');$('#menu').classList.remove('hidden');document.body.classList.remove('in-game','spectating');spectating=false;followId='';viewerCount=0;arena?.setMode(true);keys.clear();mouse.down=false;}
++function leaveMatch(notify=true){saveSession(null);buffer.clear();predictor.reset();gate.reset();eventLog=[];roster=[];rosterV=-1;$('#connection-banner').classList.add('hidden');if(notify&&(mode==='online'||mode==='lobby'))send({type:'leave'});localGame=null;myId=null;state=null;mode='menu';roomCode='';resultsShown=false;$('#modal-backdrop').classList.add('hidden');modalKind='';$('#hud').classList.add('hidden');$('#menu').classList.remove('hidden');document.body.classList.remove('in-game','spectating');spectating=false;followId='';viewerCount=0;arena?.setMode(true);keys.clear();mouse.down=false;}
+ $('#leave-game').onclick=()=>{modal(`<div class="overline">MATCH IN PROGRESS</div><h2 id="modal-title">Keluar dari arena?</h2><p class="intro">${spectating?'Kamu akan keluar dari mode penonton.':'Resource yang kamu pegang akan dilepas.'} Pertandingan pemain lain tetap berjalan.</p><button id="confirm-leave" class="button primary">KELUAR</button> <button id="cancel-leave" class="button secondary">LANJUT MAIN</button>`,'leave');$('#confirm-leave').onclick=()=>leaveMatch();$('#cancel-leave').onclick=closeModal;};
+ for(const button of document.querySelectorAll('[data-role]'))button.onclick=()=>{role=button.dataset.role;document.querySelectorAll('[data-role]').forEach(b=>{b.classList.toggle('selected',b===button);b.querySelector('.role-select').textContent=b===button?'✓':'＋';});sound('lock');};
+ function guide(){modal(`<div class="overline">FIELD MANUAL / HOW TO PLAY</div><h2 id="modal-title">Aksi dulu. Strategi selalu.</h2><p class="intro">Pertandingan selalu berlangsung 6 menit penuh. Skor tertinggi saat timer habis menang; 100 poin tidak mengakhiri match. Menit terakhir: seluruh throughput ×2. Mati hanya respawn, bukan keluar.</p><div class="instruction-grid"><div class="instruction"><b>01 / ACQUIRE</b><h3>Rebut dua terminal</h3><p>Dekati CPU, RAM, I/O, atau GPU. Tekan E untuk mengambil lock. Resource tetap di terminal, tetapi akses eksklusifnya menjadi milikmu.</p></div><div class="instruction"><b>02 / EXECUTE</b><h3>Kembali ke core</h3><p>Bawa 2 lock berbeda ke core timmu dan tekan E. Proses selesai, kedua lock dilepas, dan tim mendapat 20 throughput.</p></div><div class="instruction"><b>03 / DISRUPT</b><h3>Hentikan lawan</h3><p>Arahkan mouse dan tahan klik atau F untuk menembak. Gunakan cover dan dash. Proses yang kalah respawn 5 detik kemudian.</p></div><div class="instruction"><b>04 / RECOVER</b><h3>Putus circular wait</h3><p>Menunggu lock membuatmu berhenti. Tekan R untuk rollback: semua lock dilepas dengan biaya 15 HP. Engineer bisa memulihkan tim di dekatnya.</p></div></div><p class="intel-note"><b>UPLINK:</b> zona tengah aktif 30 detik setiap 75 detik, mulai detik ke-35. Berdiri di dalam lingkaran untuk merebutnya: 6 detik solo, 3 detik dengan rekan. Bertahan di zona menghasilkan +4 setiap 5 detik; kedua tim hadir membuat perebutan dan poin berhenti. Pemain yang menunggu lock tidak bisa merebut zona.<br><b>MAIN KOMPAK:</b> Sentinel melindungi rekan sekitar selama 2 detik. Engineer melakukan recovery dan memulihkan 30 HP rekan dalam radius 9. Pengiriman 2 lock tetap sumber poin terbesar. Uplink adalah bonus arena, terpisah dari model lock OS.</p><div class="keys-table"><span><kbd>WASD / PANAH</kbd> Bergerak</span><span><kbd>MOUSE + KLIK / F</kbd> Tembak</span><span><kbd>E</kbd> Ambil / request / kirim</span><span><kbd>SPACE</kbd> Dash · cooldown 4s</span><span><kbd>SHIFT</kbd> Skill operator</span><span><kbd>R</kbd> Rollback proses</span><span><kbd>G</kbd> Graf ketergantungan</span><span><kbd>TAB</kbd> Scoreboard</span></div><p class="intel-note">Ponsel: joystick kiri untuk bergerak, FIRE menargetkan lawan terdekat. Gunakan tombol E, SKILL, DASH dan ROLLBACK di layar. Arena 84 × 56 memiliki jalur samping dan 12 cover. Mode penonton: masukkan kode room melalui Tonton Pertandingan, pilih seluruh arena atau ikuti operator, lalu atur zoom. Pertandingan terus berjalan saat panduan terbuka.</p>`,'guide');}
+@@ -89,7 +119,8 @@
+ for(const b of document.querySelectorAll('[data-touch]')){b.onpointerdown=e=>{e.preventDefault();b.setPointerCapture(e.pointerId);if(b.dataset.touch==='fire')touch.fire=true;else pending[b.dataset.touch]=true;};b.onpointerup=b.onpointercancel=()=>{if(b.dataset.touch==='fire')touch.fire=false;};}
+ const stick=$('#joystick');stick.onpointerdown=e=>{stick.setPointerCapture(e.pointerId);updateStick(e);};stick.onpointermove=e=>{if(stick.hasPointerCapture(e.pointerId))updateStick(e);};stick.onpointerup=stick.onpointercancel=()=>{touch.x=touch.z=0;stick.firstElementChild.style.transform='';};
+ function updateStick(e){const r=stick.getBoundingClientRect(),x=e.clientX-r.left-r.width/2,y=e.clientY-r.top-r.height/2,len=Math.max(35,Math.hypot(x,y));touch.x=x/len;touch.z=y/len;stick.firstElementChild.style.transform=`translate(${touch.x*32}px,${touch.z*32}px)`;}
+-function controls(){if(spectating)return {};const p=state?.players.find(p=>p.id===myId);if(!p)return{};let angle=p.angle;
++function ownPlayer(){const p=state?.players.find(p=>p.id===myId);if(!p||mode!=='online'||!predictor.ready)return p;return {...p,x:predictor.m.x,z:predictor.m.z};}
++function controls(){if(spectating)return {};const p=ownPlayer();if(!p)return{};let angle=p.angle;
+   if(mouse.moved&&arena)angle=arena.aimAt(mouse.x,mouse.y,p);
+   else {const enemy=state.players.filter(e=>e.team!==p.team&&!e.respawn).sort((a,b)=>distance(p,a)-distance(p,b))[0];if(enemy)angle=Math.atan2(enemy.x-p.x,enemy.z-p.z);}
+   if(modalKind||mode==='online'&&!online)return{x:0,z:0,angle,fire:false};
+@@ -109,7 +140,7 @@
+   $('.player-avatar').textContent={runner:'ϟ',sentinel:'⬡',engineer:'✣'}[p.role];
+   for(const [id,cd,label]of [['dash',p.dashCd,'DASH'],['skill',p.skillCd,CLASSES[p.role].skill.toUpperCase()]]){const el=$(`#ability-${id}`);el.querySelector('span').textContent=label;el.querySelector('strong').textContent=cd>0?`${cd.toFixed(1)}s`:'READY';el.classList.toggle('cooling',cd>0);}
+   }
+-  $('#latency').innerHTML=mode==='local'?'LOCAL<br><small>30 TICK</small>':online?`${ping} MS<br><small>30 TICK</small>`:'OFFLINE<br><small>RECONNECT</small>';
++  $('#latency').innerHTML=mode==='local'?'LOCAL<br><small>30 TICK</small>':online?`${ping} MS<br><small>${telemetry.read(performance.now()).downKiBps.toFixed(0)} KB/S ↓</small>`:'OFFLINE<br><small>RECONNECT</small>';
+   $('#deadlock-alert').classList.toggle('hidden',!p?.deadlocked);
+   $('#respawn-overlay').classList.toggle('hidden',!p?.respawn);$('#respawn-count').textContent=Math.ceil(p?.respawn||0);
+   $('#resource-list').innerHTML=state.resources.map(r=>{const owner=state.players.find(q=>q.id===r.owner);return `<div class="resource-row"><i style="background:${r.color}"></i><span>${r.id}</span><span style="color:${owner?.id===myId?'var(--lime)':''}">${owner?esc(owner.id===myId?'YOUR LOCK':owner.name):'AVAILABLE'}</span></div>`;}).join('');
+@@ -144,11 +175,24 @@
+   for(const p of list){const pos=positions.get(p.id);svg+=`<circle cx="${pos.x}" cy="${pos.y}" r="10" fill="${p.deadlocked?'#fb8377':p.team?'#784841':'#315e56'}" stroke="${p.team?'#fb8377':'#71ded2'}"/><text x="${pos.x}" y="${pos.y+3}" text-anchor="middle" fill="#f0f5e7" font-size="7">${esc(p.name.slice(0,3))}</text><text x="${pos.x}" y="${pos.y+21}" text-anchor="middle" fill="#93a89b" font-size="7">${p.held.join('+')}</text>`;}
+   $('#graph').innerHTML=svg;$('#graph-note').textContent=state.cycles.length?`${state.cycles.length} siklus deadlock. Panah: peminta → pemilik. R untuk memutus siklus.`:edges?`${edges} proses menunggu. Belum ada circular wait.`:'Tidak ada proses menunggu. Semua jalur eksekusi terbuka.';
+ }
++// One fixed client tick online: predict locally, then send only if the input changed (or as a keep-alive).
++function sendInput(){
++  const input=controls(),me=state?.players.find(p=>p.id===myId);
++  if(Number.isFinite(input.angle))aimAngle=input.angle;
++  const seq=predictor.tick(input,me),out=gate.check(input);
++  if(out&&seq!==null&&socket?.readyState===WebSocket.OPEN){const text=JSON.stringify({type:'input',seq,input:out});socket.send(text);telemetry.up(text.length,performance.now());}
++}
++// Remote players are interpolated ~2 ticks in the past; the local player is drawn at the predicted position.
++function netView(now){
++  const view=buffer.sample(now)||state;if(!view||spectating||!predictor.ready)return view;
++  return {...view,players:view.players.map(p=>p.id===myId?{...p,x:predictor.m.x,z:predictor.m.z,angle:aimAngle}:p)};
++}
+ function frame(now){const dt=Math.min((now-lastFrame)/1000,.1);lastFrame=now;accumulator+=dt;
+-  while(accumulator>=1/30){accumulator-=1/30;if(mode==='local'){localGame.input(myId,controls());localGame.update(1/30);state=localGame.snapshot();}else if(mode==='online'&&!spectating)send({type:'input',input:controls()});else if(mode!=='online'){demo.update(1/30);demoTime+=1/30;if(demo.phase==='finished'){demo.rematch();demo.start(true);}}}
+-  const renderState=['local','online'].includes(mode)?state:demo.snapshot();arena?.render(renderState,spectating?followId:myId,now/1000,dt);
++  while(accumulator>=1/30){accumulator-=1/30;if(mode==='local'){localGame.input(myId,controls());localGame.update(1/30);state=localGame.snapshot();}else if(mode==='online'&&!spectating)sendInput();else if(mode!=='online'){demo.update(1/30);demoTime+=1/30;if(demo.phase==='finished'){demo.rematch();demo.start(true);}}}
++  const renderState=mode==='online'?netView(now):mode==='local'?state:demo.snapshot();arena?.render(renderState,spectating?followId:myId,now/1000,dt);
+   if(now-lastHud>100&&['local','online'].includes(mode)){updateHud();lastHud=now;}
+   requestAnimationFrame(frame);
+ }
+ requestAnimationFrame(frame);
+ if(!resumeSession&&new URLSearchParams(location.search).has('room'))setTimeout(()=>rooms(new URLSearchParams(location.search).get('watch')==='1'),500);
++initSidebar(()=>({...telemetry.read(performance.now()),ping,online,mode,spectating,delay:buffer.delay,jitter:buffer.jitter,pred:predictor.stats,rosterWaits,room:roomCode}));
+diff -ruN '--exclude=node_modules' '--exclude=tools' '--exclude=evaluation' '--exclude=vendor' '--exclude=artifacts' '--exclude=package-lock.json' a/src/changes.js ./src/changes.js
+--- a/src/changes.js	1970-01-01 00:00:00.000000000 +0000
++++ ./src/changes.js	2026-10-06 16:15:04.878957672 +0000
+@@ -0,0 +1,35 @@
++// Content of the in-game "what changed" sidebar (press C). Snippets are shortened excerpts of the real diff.
++export const CHANGES = [
++  {id:1, tag:'PROTOCOL', title:'Binary state snapshots', files:['shared/codec.js','server/index.js','src/app.js'],
++   summary:'The 5.3 KB JSON state sent 30x/s to every client is replaced by a quantized binary frame (29-byte header + 19 bytes per player + 10 per bullet).',
++   before:'ws.send(JSON.stringify({type:\'state\', state:game.snapshot(), ...}))   // ~5300 B',
++   after:'ws.send(encodeState(game, room.rv))   // ~250 B: int16 x/z*50, u16 angle, u8 hp/cooldowns'},
++  {id:2, tag:'PROTOCOL', title:'Static data sent once', files:['server/index.js','src/app.js'],
++   summary:'Names, roles, teams and max HP go in a "roster" message only when the roster changes. Feed events are sent once as a reliable message instead of the last 12 every tick.',
++   before:'players:[{id,name,role,team,maxHp,...}]  events:[last 12]   // every tick',
++   after:'{type:\'roster\',v,players}  {type:\'events\',events:[new only]}  // on change'},
++  {id:3, tag:'SERVER', title:'Backpressure: drop stale frames', files:['server/index.js'],
++   summary:'A congested client no longer builds up a queue of old state. Frames are skipped once more than 16 KiB is buffered (v1.2 allowed 256 KB, about 1 s of lag).',
++   before:'if (ws.bufferedAmount < 256000) ws.send(json)',
++   after:'if (ws.bufferedAmount > MAX_BUFFER) {dropped++; return;}  // MAX_BUFFER = 16 KiB'},
++  {id:4, tag:'SERVER', title:'Serialize once, cheaper spectators, idle rooms', files:['server/index.js'],
++   summary:'One encode per room per tick is shared by all recipients. Spectators get 15 Hz (10 Hz when the server is behind). Lobby and finished rooms send a keep-alive every 500 ms.',
++   before:'for (const ws of everyone) send(ws, {type:\'state\', state:game.snapshot()})   // N stringifies',
++   after:'const frame = encodeState(game, rv); for (const ws of players) sendFrame(ws, frame)'},
++  {id:5, tag:'CLIENT', title:'Snapshot interpolation', files:['src/netcode.js','src/app.js'],
++   summary:'Other players are drawn about 2 ticks in the past, interpolated between two real snapshots on the server tick timeline, so dropped or late frames no longer cause stutter.',
++   before:'arena.render(state, ...)   // latest packet, 30 Hz steps',
++   after:'arena.render(buffer.sample(now), ...)   // delay adapts to measured jitter (50-250 ms)'},
++  {id:6, tag:'CLIENT', title:'Client-side prediction + reconciliation', files:['shared/game.js','src/netcode.js','src/app.js'],
++   summary:'Your own movement is simulated locally with the same stepMover() the server runs. Each snapshot carries the last applied input number; unacknowledged inputs are replayed on top of the server position.',
++   before:'send({type:\'input\', input}); /* position waits for the server round trip */',
++   after:'predictor.tick(input); /* move now */  predictor.reconcile(me, playing)  // replay inputs after ack'},
++  {id:7, tag:'INPUT', title:'Change-only input, numbering and validation', files:['src/netcode.js','server/index.js'],
++   summary:'Clients send input only when it changes (plus a 200 ms keep-alive). The server sanitizes every field, ignores malformed packets, wraps handlers in try/catch and disconnects clients that spam invalid messages.',
++   before:'send({type:\'input\', input: controls()})   // every tick, unvalidated',
++   after:'const out = gate.check(input); if (out) send({type:\'input\', seq, input: out})'},
++  {id:8, tag:'OPS', title:'Stable tick, metrics, stale-link warning', files:['server/index.js','src/app.js'],
++   summary:'The 30 Hz loop uses an absolute clock (setInterval truncated to 33 ms and drifted). GET /api/metrics reports tick time, bandwidth, drops and RTT. The client warns after 1 s without data (was 12 s).',
++   before:'setInterval(tick, 1000/30)',
++   after:'nextTick += TICK_MS; setTimeout(loop, nextTick - now)   // + /api/metrics'},
++];
+diff -ruN '--exclude=node_modules' '--exclude=tools' '--exclude=evaluation' '--exclude=vendor' '--exclude=artifacts' '--exclude=package-lock.json' a/src/netcode.js ./src/netcode.js
+--- a/src/netcode.js	1970-01-01 00:00:00.000000000 +0000
++++ ./src/netcode.js	2026-10-06 11:06:13.233839534 +0000
+@@ -0,0 +1,142 @@
++// Deadlock v1.3 client netcode: snapshot interpolation, client-side prediction and live telemetry.
++import {stepMover} from '../shared/game.js';
++
++const TICK_MS = 1000 / 30;
++const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
++const lerp = (a, b, f) => a + (b - a) * f;
++const lerpAngle = (a, b, f) => a + Math.atan2(Math.sin(b - a), Math.cos(b - a)) * f;
++
++// ---------------------------------------------------------------------------
++// SnapshotBuffer: render remote players ~2 ticks in the past, interpolating between two real snapshots.
++// The timeline is the server's own tick counter, so dropped or late frames do not distort movement.
++// ---------------------------------------------------------------------------
++export class SnapshotBuffer {
++  constructor() {this.clear();}
++  clear() {this.items = []; this.lastTick = null; this.unwrapped = 0; this.offset = null; this.delay = 100; this.meanGap = TICK_MS; this.jitter = 0; this.lastArrival = 0; this.frames = 0;}
++  push(state, now) {
++    // The wire tick is a u16; unwrap it into a monotonically increasing counter.
++    if (this.lastTick === null) this.unwrapped = state.tick;
++    else this.unwrapped += (state.tick - this.lastTick + 0x10000) & 0xFFFF;
++    this.lastTick = state.tick;
++    if (this.items.length && this.unwrapped <= this.items[this.items.length - 1].n) return;
++    const tm = this.unwrapped * TICK_MS;
++    // Clock offset between server timeline and local clock: follow the fastest packets down at once, drift up slowly.
++    const sample = now - tm;
++    this.offset = this.offset === null || sample < this.offset ? sample : this.offset + (sample - this.offset) * .02;
++    if (this.lastArrival) {
++      const gap = now - this.lastArrival;
++      this.meanGap += (gap - this.meanGap) * .1; this.jitter += (Math.abs(gap - this.meanGap) - this.jitter) * .1;
++      this.delay = clamp(this.meanGap * 1.5 + this.jitter * 2 + 10, 50, 250);
++    }
++    this.lastArrival = now; this.frames++;
++    this.items.push({n: this.unwrapped, tm, s: state});
++    while (this.items.length > 24) this.items.shift();
++  }
++  latest() {return this.items.length ? this.items[this.items.length - 1].s : null;}
++  sample(now) {
++    const n = this.items.length;
++    if (!n) return null;
++    const newest = this.items[n - 1].s;
++    if (n < 2 || newest.phase !== 'playing') return newest;
++    const rt = now - this.offset - this.delay;
++    let j = 0; while (j < n && this.items[j].tm < rt) j++;
++    if (j === 0) return this.items[0].s;
++    if (j === n) return newest;
++    const a = this.items[j - 1], b = this.items[j], f = clamp((rt - a.tm) / (b.tm - a.tm), 0, 1);
++    const before = new Map(a.s.players.map(p => [p.id, p]));
++    const players = b.s.players.map(p => {
++      const q = before.get(p.id);
++      if (!q || q.respawn || p.respawn) return p;
++      return {...p, x: lerp(q.x, p.x, f), z: lerp(q.z, p.z, f), angle: lerpAngle(q.angle, p.angle, f)};
++    });
++    const bullets0 = new Map(a.s.bullets.map(x => [x.id, x]));
++    const bullets = b.s.bullets.map(x => {const q = bullets0.get(x.id); return q ? {...x, x: lerp(q.x, x.x, f), z: lerp(q.z, x.z, f)} : x;});
++    return {...b.s, players, bullets};
++  }
++}
++
++// ---------------------------------------------------------------------------
++// Predictor: move the local player immediately, then reconcile with the authoritative state.
++// ---------------------------------------------------------------------------
++export class Predictor {
++  constructor() {this.reset();}
++  reset() {
++    this.m = null; this.hist = []; this.seq = 0;
++    this.stats = {reconciles: 0, corrections: 0, snaps: 0, lastErr: 0, maxErr: 0, sumErr: 0};
++  }
++  get ready() {return !!this.m;}
++  // Advance one fixed client tick. `me` is the newest authoritative record of the local player (used only to initialise).
++  tick(input, me) {
++    if (!this.m) {
++      if (!me) return null;
++      this.m = {x: me.x, z: me.z, role: me.role, boost: me.boost, dashCd: me.dashCd, skillCd: me.skillCd, waiting: !!me.waiting, canAct: true};
++    }
++    this.seq = (this.seq + 1) & 0xFFFF;
++    const step = {x: clamp(Number(input.x) || 0, -1, 1), z: clamp(Number(input.z) || 0, -1, 1), dash: !!input.dash, skill: !!input.skill};
++    this.hist.push({seq: this.seq, step});
++    if (this.hist.length > 300) this.hist.shift();
++    stepMover(this.m, step, 1 / 30);
++    return this.seq;
++  }
++  // Called for every authoritative snapshot containing the local player.
++  reconcile(me, playing) {
++    if (!this.m || !me) return;
++    const base = {x: me.x, z: me.z, role: me.role, boost: me.boost, dashCd: me.dashCd, skillCd: me.skillCd, waiting: !!me.waiting, canAct: !!playing && !me.respawn && !me.disconnected};
++    const ack = me.ack;
++    if (ack === 0xFFFF) {this.m.canAct = base.canAct; this.m.waiting = base.waiting; return;}     // server has not seen any input yet
++    const ahead = (this.seq - ack) & 0xFFFF;
++    if (ahead > 0x7FFF) {Object.assign(this.m, base); this.hist.length = 0; this.stats.snaps++; return;}   // server is ahead of us (tab was asleep): trust it
++    while (this.hist.length && ((ack - this.hist[0].seq) & 0xFFFF) <= 0x7FFF) this.hist.shift();            // drop inputs the server has applied
++    const pred = {...base};
++    for (const h of this.hist) stepMover(pred, h.step, 1 / 30);                                              // replay what the server has not seen yet
++    const err = Math.hypot(pred.x - this.m.x, pred.z - this.m.z), s = this.stats;
++    s.reconciles++; s.lastErr = err; s.sumErr += err; s.maxErr = Math.max(s.maxErr, err);
++    if (err > 3) {this.m.x = pred.x; this.m.z = pred.z; s.snaps++;}
++    else if (err > .02) {this.m.x += (pred.x - this.m.x) * .4; this.m.z += (pred.z - this.m.z) * .4; s.corrections++;}
++    this.m.boost = pred.boost; this.m.dashCd = pred.dashCd; this.m.skillCd = pred.skillCd; this.m.waiting = pred.waiting; this.m.canAct = pred.canAct; this.m.role = pred.role;
++  }
++}
++
++// ---------------------------------------------------------------------------
++// Telemetry: rolling bandwidth / frame counters shown in the sidebar.
++// ---------------------------------------------------------------------------
++export class Telemetry {
++  constructor() {this.reset();}
++  reset() {this.window = []; this.upWindow = []; this.frames = 0; this.lastFrameBytes = 0; this.gapMax = 0; this.lastAt = 0; this.sentInputs = 0; this.total = 0;}
++  down(bytes, now, isFrame) {
++    this.window.push({t: now, bytes, frame: isFrame ? 1 : 0}); this.total += bytes;
++    if (isFrame) {this.lastFrameBytes = bytes; this.frames++; if (this.lastAt) this.gapMax = Math.max(this.gapMax * .995, now - this.lastAt); this.lastAt = now;}
++    while (this.window.length && now - this.window[0].t > 3000) this.window.shift();
++  }
++  up(bytes, now) {this.upWindow.push({t: now, bytes}); while (this.upWindow.length && now - this.upWindow[0].t > 3000) this.upWindow.shift();}
++  read(now) {
++    while (this.window.length && now - this.window[0].t > 3000) this.window.shift();
++    while (this.upWindow.length && now - this.upWindow[0].t > 3000) this.upWindow.shift();
++    const span = Math.max(1, Math.min(3000, this.window.length ? now - this.window[0].t : 1000)) / 1000;
++    const down = this.window.reduce((a, w) => a + w.bytes, 0), frames = this.window.reduce((a, w) => a + w.frame, 0);
++    const upSpan = Math.max(1, Math.min(3000, this.upWindow.length ? now - this.upWindow[0].t : 1000)) / 1000;
++    const up = this.upWindow.reduce((a, w) => a + w.bytes, 0);
++    return {downKiBps: down / span / 1024, upKiBps: up / upSpan / 1024, framesPerSec: frames / span, upMsgsPerSec: this.upWindow.length / upSpan, lastFrameBytes: this.lastFrameBytes, maxGapMs: this.gapMax};
++  }
++}
++
++// Decide whether the current input needs to go over the wire. Unchanged input is implied by the server
++// (it keeps the last input in force), so only changes and a 200 ms keep-alive are sent.
++export class InputGate {
++  constructor() {this.last = null; this.since = 99;}
++  reset() {this.last = null; this.since = 99;}
++  check(input) {
++    this.since++;
++    const q = {x: Math.round(clamp(input.x || 0, -1, 1) * 100) / 100, z: Math.round(clamp(input.z || 0, -1, 1) * 100) / 100, fire: !!input.fire};
++    const flags = ['interact', 'rollback', 'skill', 'dash'].filter(k => input[k]);
++    const last = this.last;
++    const angle = Number.isFinite(input.angle) ? input.angle : 0;
++    const changed = !last || q.x !== last.x || q.z !== last.z || q.fire !== last.fire || Math.abs(Math.atan2(Math.sin(angle - last.angle), Math.cos(angle - last.angle))) > .02 || flags.length > 0;
++    if (!changed && this.since < 6) return null;
++    this.last = {...q, angle}; this.since = 0;
++    const out = {x: q.x, z: q.z, angle: Math.round(angle * 1000) / 1000};
++    if (q.fire) out.fire = true;
++    for (const k of flags) out[k] = true;
++    return out;
++  }
++}
+diff -ruN '--exclude=node_modules' '--exclude=tools' '--exclude=evaluation' '--exclude=vendor' '--exclude=artifacts' '--exclude=package-lock.json' a/src/results.js ./src/results.js
+--- a/src/results.js	1970-01-01 00:00:00.000000000 +0000
++++ ./src/results.js	2026-10-07 05:53:53.262963039 +0000
+@@ -0,0 +1,46 @@
++// Generated by tools/evaluate.mjs on 2026-10-07T05:51:26.444Z
++export const RESULTS = {
++  "rows": [
++    [
++      "Snapshot on the wire (10 players)",
++      "5.1 KB",
++      "228 B"
++    ],
++    [
++      "Download per player",
++      "199.6 KiB/s",
++      "9.7 KiB/s (-95%)"
++    ],
++    [
++      "Upload per player",
++      "30.1 msg/s",
++      "5.8 msg/s"
++    ],
++    [
++      "Room + 20 spectators, server out",
++      "48.59 Mbit/s",
++      "1.6 Mbit/s"
++    ],
++    [
++      "Server CPU, 100 players (10 rooms)",
++      "21.1% of 1 core",
++      "9.4% of 1 core"
++    ],
++    [
++      "Ping, 10 Mbit uplink (p50 / p95)",
++      "241 / 2238 ms",
++      "33 / 35 ms"
++    ],
++    [
++      "Ping, 4 Mbit uplink (p50 / p95)",
++      "606 / 6180 ms",
++      "32 / 34 ms"
++    ],
++    [
++      "Key press to movement @ 150 ms RTT",
++      "201 ms",
++      "18 ms"
++    ]
++  ],
++  "note": "Measured on 1 CPU core(s), Node v22.22.2, loopback + emulated links. Single-core sandbox: absolute CPU numbers include the load generator competing for the same core."
++};
+diff -ruN '--exclude=node_modules' '--exclude=tools' '--exclude=evaluation' '--exclude=vendor' '--exclude=artifacts' '--exclude=package-lock.json' a/src/sidebar.js ./src/sidebar.js
+--- a/src/sidebar.js	1970-01-01 00:00:00.000000000 +0000
++++ ./src/sidebar.js	2026-10-06 16:15:04.879872474 +0000
+@@ -0,0 +1,38 @@
++// In-game sidebar: live network telemetry, measured results and the list of v1.3 code changes. Toggle with C.
++import {CHANGES} from './changes.js';
++import {RESULTS} from './results.js';
++
++const esc = (v) => String(v).replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
++const fmt = (v, d = 0) => Number.isFinite(v) ? v.toFixed(d) : '—';
++
++export function initSidebar(readTelemetry) {
++  const tab = document.createElement('button');
++  tab.id = 'changes-toggle'; tab.setAttribute('aria-expanded', 'false'); tab.title = 'Perubahan kode v1.3 (C)';
++  tab.innerHTML = '<b>Δ</b><span>v1.3 CHANGES</span>';
++  const side = document.createElement('aside');
++  side.id = 'changes-sidebar'; side.className = 'hidden'; side.setAttribute('aria-label', 'Perubahan kode versi 1.3');
++  const results = RESULTS ? `<section class="cs-block"><h3>MEASURED · v1.2 → v1.3</h3><table class="cs-table">${RESULTS.rows.map(r => `<tr><td>${esc(r[0])}</td><td>${esc(r[1])}</td><td>${esc(r[2])}</td></tr>`).join('')}</table><p class="cs-note">${esc(RESULTS.note)}</p></section>` : '';
++  side.innerHTML = `<header><div><small>BUILD 1.3 · NETCODE</small><h2>Code changes</h2></div><button class="icon-button" id="changes-close" aria-label="Tutup">✕</button></header>
++  <section class="cs-block"><h3>LIVE CONNECTION</h3><div id="cs-live" class="cs-grid"></div></section>${results}
++  <section class="cs-block"><h3>WHAT CHANGED</h3>${CHANGES.map(c => `<details class="cs-change"><summary><i>${c.id}</i><span>${esc(c.title)}</span><em>${esc(c.tag)}</em></summary>
++    <p>${esc(c.summary)}</p><div class="cs-files">${c.files.map(f => `<code>${esc(f)}</code>`).join('')}</div>
++    <pre class="cs-del"><b>−</b>${esc(c.before)}</pre><pre class="cs-add"><b>+</b>${esc(c.after)}</pre></details>`).join('')}</section>
++  <footer>Press <kbd>C</kbd> to toggle · metrics endpoint: <code>/api/metrics</code></footer>`;
++  document.body.append(tab, side);
++  const live = side.querySelector('#cs-live');
++  const toggle = (open = side.classList.contains('hidden')) => {side.classList.toggle('hidden', !open); tab.setAttribute('aria-expanded', String(open)); tab.classList.toggle('open', open); if (open) refresh();};
++  const cell = (label, value, unit = '') => `<div><span>${label}</span><b>${value}<small>${unit}</small></b></div>`;
++  function refresh() {
++    const t = readTelemetry(), p = t.pred;
++    const avgErr = p.reconciles ? p.sumErr / p.reconciles : NaN;
++    live.innerHTML = t.online && ['online', 'lobby'].includes(t.mode)
++      ? cell('DOWN', fmt(t.downKiBps, 1), ' KiB/s') + cell('FRAME', fmt(t.lastFrameBytes), ' B') + cell('FRAMES/S', fmt(t.framesPerSec, 1)) + cell('PING', fmt(t.ping), ' ms')
++        + cell('INTERP DELAY', fmt(t.delay), ' ms') + cell('JITTER', fmt(t.jitter, 1), ' ms') + cell('UP', fmt(t.upKiBps, 2), ' KiB/s') + cell('INPUT MSG/S', fmt(t.upMsgsPerSec, 1))
++        + cell('PRED. ERR AVG', t.spectating ? '—' : fmt(avgErr, 3), ' u') + cell('PRED. ERR MAX', t.spectating ? '—' : fmt(p.maxErr, 2), ' u') + cell('CORRECTIONS', t.spectating ? '—' : p.corrections) + cell('HARD SNAPS', t.spectating ? '—' : p.snaps)
++      : '<p class="cs-note">Join an online room to see live numbers. Practice mode runs locally with no network.</p>';
++  }
++  tab.addEventListener('click', () => toggle());
++  side.querySelector('#changes-close').addEventListener('click', () => toggle(false));
++  addEventListener('keydown', e => {if (e.code === 'KeyC' && !e.ctrlKey && !e.metaKey && !e.altKey && !/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName)) toggle();});
++  setInterval(() => {if (!side.classList.contains('hidden')) refresh();}, 500);
++}
+diff -ruN '--exclude=node_modules' '--exclude=tools' '--exclude=evaluation' '--exclude=vendor' '--exclude=artifacts' '--exclude=package-lock.json' a/style.css ./style.css
+--- a/style.css	2026-10-05 12:54:49.000000000 +0000
++++ ./style.css	2026-10-06 16:15:04.926902984 +0000
+@@ -39,3 +39,19 @@
+ 
+ .objectives-stack{display:contents}
+ @media(max-width:760px) and (min-height:551px){.objectives-stack{display:flex;flex-direction:column;gap:8px;position:absolute;top:88px;left:9px;width:195px}.objectives-stack .objective-panel,.objectives-stack #uplink-panel{position:static;transform:none;width:100%;margin:0}}
++
++/* v1.3: stale-connection warning + changes sidebar */
++#net-warning{position:fixed;z-index:29;top:64px;left:50%;transform:translateX(-50%);background:#483321ee;border:1px solid #f9bd69;padding:8px 14px;font:10px var(--mono);letter-spacing:.5px;border-radius:4px;pointer-events:none}
++#changes-toggle{position:fixed;z-index:24;left:0;top:50%;transform:translateY(-50%);display:flex;flex-direction:column;align-items:center;gap:8px;padding:12px 7px;background:#182124e6;border:1px solid var(--line);border-left:0;border-radius:0 6px 6px 0;color:var(--lime)}
++#changes-toggle b{font:600 20px var(--heading)}#changes-toggle span{writing-mode:vertical-rl;font:8px var(--mono);letter-spacing:1.5px;color:#a8b6b2}#changes-toggle.open{left:min(390px,94vw)}
++#changes-sidebar{position:fixed;z-index:25;left:0;top:0;bottom:0;width:min(390px,94vw);overflow-y:auto;background:linear-gradient(180deg,#111b1ef7,#0d1517f7);border-right:1px solid #ffffff22;box-shadow:12px 0 50px #0006;padding:18px 18px 28px;font-size:12px;color:#c4d0cc}
++#changes-sidebar>header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:14px}#changes-sidebar small{font:8px var(--mono);letter-spacing:1.2px;color:var(--lime)}#changes-sidebar h2{font:700 30px var(--heading);margin:4px 0 0}
++.cs-block{border-top:1px solid var(--line);padding:14px 0}.cs-block h3{font:9px var(--mono);letter-spacing:1px;color:var(--lime);margin:0 0 10px}
++.cs-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}.cs-grid>div{background:#0b1316;border:1px solid var(--line);padding:8px 9px;border-radius:4px}.cs-grid span{display:block;font:7px var(--mono);letter-spacing:.8px;color:#8ea39d}.cs-grid b{font:600 19px var(--heading)}.cs-grid b small{font:8px var(--mono);color:#8ea39d;margin-left:3px}
++.cs-table{width:100%;border-collapse:collapse;font:10px var(--mono)}.cs-table td{padding:6px 4px;border-bottom:1px solid var(--line);vertical-align:top}.cs-table td:nth-child(2){color:#f2a79b}.cs-table td:nth-child(3){color:var(--lime)}.cs-note{font-size:10px;color:#8ea39d;line-height:1.6}
++.cs-change{border:1px solid var(--line);border-radius:5px;margin-bottom:8px;background:#0e181b}.cs-change summary{display:flex;align-items:center;gap:9px;padding:10px;cursor:pointer;list-style:none}.cs-change summary::-webkit-details-marker{display:none}
++.cs-change summary i{font:normal 9px var(--mono);color:#142014;background:var(--lime);border-radius:50%;width:18px;height:18px;display:grid;place-items:center;flex-shrink:0}.cs-change summary span{flex:1;font:600 15px var(--heading);letter-spacing:.3px;color:#e9efe5}.cs-change summary em{font:normal 7px var(--mono);letter-spacing:.8px;color:#8ea39d;border:1px solid var(--line);padding:2px 5px;border-radius:3px}
++.cs-change p{padding:0 10px;margin:2px 0 8px;line-height:1.65;color:#a9bab5}.cs-files{display:flex;flex-wrap:wrap;gap:5px;padding:0 10px 8px}.cs-files code,#changes-sidebar footer code{font:9px var(--mono);background:#0b1316;padding:2px 6px;border-radius:3px;color:#b9cdb0}
++.cs-change pre{margin:0;padding:7px 10px 7px 26px;font:9px/1.55 var(--mono);white-space:pre-wrap;word-break:break-word;position:relative}.cs-change pre b{position:absolute;left:10px}.cs-del{background:#3a1b1f66;color:#f2a79b}.cs-add{background:#1d3a2266;color:#b7ef9a;border-radius:0 0 5px 5px}
++#changes-sidebar footer{font:9px var(--mono);color:#8ea39d;border-top:1px solid var(--line);padding-top:12px}#changes-sidebar footer kbd{color:var(--lime)}
++@media(max-width:760px){#changes-toggle{top:auto;bottom:230px;transform:none}}
+diff -ruN '--exclude=node_modules' '--exclude=tools' '--exclude=evaluation' '--exclude=vendor' '--exclude=artifacts' '--exclude=package-lock.json' a/tests/netcode.test.js ./tests/netcode.test.js
+--- a/tests/netcode.test.js	1970-01-01 00:00:00.000000000 +0000
++++ ./tests/netcode.test.js	2026-10-07 05:50:51.302763455 +0000
+@@ -0,0 +1,91 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import {Game, stepMover} from '../shared/game.js';
++import {encodeState, decodeState, rosterOf, HEADER} from '../shared/codec.js';
++import {SnapshotBuffer, Predictor, InputGate} from '../src/netcode.js';
++import {simulate} from '../tools/predict-sim.mjs';
++
++function busyGame() {
++  const g = new Game(); for (let i = 0; i < 10; i++) g.addPlayer('p' + i, 'P' + i, ['runner', 'sentinel', 'engineer'][i % 3], i % 2, true);
++  g.start(false); return g;
++}
++test('binary codec round-trips a live 5v5 snapshot within quantization error and is >90% smaller than JSON', () => {
++  const g = busyGame(); let jsonBytes = 0, binBytes = 0;
++  for (let i = 0; i < 400; i++) {
++    g.update(1 / 30);
++    const snap = g.snapshot(), bin = encodeState(g, 7);
++    jsonBytes += JSON.stringify({type: 'state', state: snap}).length; binBytes += bin.length;
++    const out = decodeState(bin, rosterOf(g), 7);
++    assert.equal(out.players.length, snap.players.length);
++    snap.players.forEach((p, k) => {
++      const q = out.players[k];
++      assert.equal(q.id, p.id); assert.ok(Math.abs(q.x - p.x) <= .011 && Math.abs(q.z - p.z) <= .011);
++      assert.ok(Math.abs(q.hp - Math.ceil(p.hp)) <= 1e-9); assert.deepEqual(q.held, p.held); assert.equal(q.waiting, p.waiting); assert.equal(q.deadlocked, p.deadlocked);
++      assert.equal(q.kills, p.kills); assert.equal(q.deliveries, p.deliveries);
++    });
++    assert.deepEqual(out.scores, snap.scores); assert.equal(out.phase, snap.phase); assert.equal(out.tick, snap.tick & 0xFFFF);
++    assert.equal(out.bullets.length, snap.bullets.length);
++    snap.bullets.forEach((b, k) => assert.ok(b.id === out.bullets[k].id && Math.abs(out.bullets[k].x - b.x) <= .011));
++    assert.equal(Math.ceil(out.time), Math.ceil(snap.time));
++  }
++  assert.ok(binBytes / jsonBytes < .1, `ratio ${(binBytes / jsonBytes).toFixed(3)}`);
++});
++test('decode rejects malformed frames and waits for a matching roster version', () => {
++  const g = busyGame(), bin = encodeState(g, 3), roster = rosterOf(g);
++  assert.equal(decodeState(new Uint8Array(5), roster, 3), null);
++  assert.equal(decodeState(bin.subarray(0, HEADER + 10), roster, 3), null);
++  assert.equal(decodeState(bin, roster, 4).stale, true);
++  assert.equal(decodeState(bin, [], 3).stale, true);
++  assert.equal(decodeState(bin, roster, 3).stale, undefined);
++});
++test('cycles, resource owners and uplink survive the wire format', () => {
++  const g = new Game(); g.addPlayer('a', 'A', 'runner', 0); g.addPlayer('b', 'B', 'runner', 1); g.start(false);
++  const take = (p, id) => {const r = g.resources.find(r => r.id === id); p.x = r.x; p.z = r.z; g.interact(p);};
++  const [a, b] = g.players; take(a, 'CPU'); take(b, 'RAM'); take(a, 'RAM'); take(b, 'CPU'); g.update(1 / 30);
++  const out = decodeState(encodeState(g, 1), rosterOf(g), 1);
++  assert.equal(out.cycles.length, 1); assert.deepEqual([...out.cycles[0]].sort(), ['a', 'b']);
++  assert.equal(out.resources.find(r => r.id === 'CPU').owner, 'a'); assert.deepEqual(out.players[0].held, ['CPU']); assert.equal(out.players[0].waiting, 'RAM'); assert.equal(out.players[0].deadlocked, true);
++});
++test('prediction math is identical to the server: stepMover == Game.update for random inputs incl. dash and skill', () => {
++  const g = new Game(); g.addPlayer('a', 'A', 'runner', 0); g.addPlayer('b', 'B', 'sentinel', 1); g.start(false);
++  const p = g.players[0], m = {x: p.x, z: p.z, role: p.role, boost: p.boost, dashCd: p.dashCd, skillCd: p.skillCd, waiting: false, canAct: true};
++  let s = 12345; const r = () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296;
++  for (let i = 0; i < 1500; i++) {
++    const inp = {x: Math.round(r() * 2 - 1), z: Math.round(r() * 2 - 1), dash: r() < .05, skill: r() < .02, angle: r() * 6};
++    g.input('a', inp, i & 0xFFFF); g.update(1 / 30); stepMover(m, inp, 1 / 30);
++    assert.ok(Math.abs(m.x - p.x) < 1e-9 && Math.abs(m.z - p.z) < 1e-9, `diverged at tick ${i}`);
++    assert.ok(Math.abs(m.boost - p.boost) < 1e-9 && Math.abs(m.dashCd - p.dashCd) < 1e-9 && Math.abs(m.skillCd - p.skillCd) < 1e-9);
++  }
++});
++test('server ack counts unchanged-input ticks so change-only sending stays reconcilable', () => {
++  const g = new Game(); g.addPlayer('a', 'A', 'runner', 0); g.addPlayer('b', 'B', 'runner', 1); g.start(false);
++  const p = g.players[0]; assert.equal(g.ack(p), 0xFFFF);
++  g.input('a', {x: 1}, 10); g.update(1 / 30); assert.equal(g.ack(p), 10);
++  g.update(1 / 30); g.update(1 / 30); assert.equal(g.ack(p), 12);
++  g.input('a', {x: 0}, 13); g.update(1 / 30); assert.equal(g.ack(p), 13);
++});
++test('prediction + reconciliation: no hard snaps and tiny error at 40, 150 and 300 ms RTT, with dashes, skills and wall contact', () => {
++  for (const oneWay of [20, 75, 150]) {
++    const r = simulate({oneWayMs: oneWay, jitterMs: 15, seconds: 40, seed: oneWay});
++    assert.equal(r.snaps, 0, `snaps at ${oneWay}`); assert.ok(r.avgErr < .35, `avg err ${r.avgErr} at ${oneWay}`); assert.ok(r.maxErr < 3, `max ${r.maxErr}`);
++    assert.ok(r.inputMsgsPerSec < r.ticksPerSec, 'change-only input sends fewer messages than ticks');
++  }
++});
++test('prediction removes the round trip from input latency', () => {
++  const a = simulate({oneWayMs: 75, seconds: 4, script: 'press', prediction: false, seed: 3}), b = simulate({oneWayMs: 75, seconds: 4, script: 'press', prediction: true, seed: 3});
++  assert.ok(a.firstMotionMs !== null && b.firstMotionMs !== null);
++  assert.ok(a.firstMotionMs > 150, `without prediction ${a.firstMotionMs}`); assert.ok(b.firstMotionMs < 40, `with prediction ${b.firstMotionMs}`);
++});
++test('InputGate sends changes and a keep-alive, never repeats identical input every tick', () => {
++  const gate = new InputGate(); let sent = 0;
++  for (let i = 0; i < 60; i++) if (gate.check({x: 1, z: 0, angle: 1, fire: false})) sent++;
++  assert.ok(sent >= 9 && sent <= 11, `sent ${sent}`);
++  assert.ok(gate.check({x: 1, z: 0, angle: 1, fire: true})); assert.ok(gate.check({x: 1, z: 0, angle: 1, fire: true, dash: true}));
++});
++test('SnapshotBuffer interpolates between two snapshots and survives tick wrap-around', () => {
++  const buf = new SnapshotBuffer(), mk = (tick, x) => ({tick, phase: 'playing', players: [{id: 'a', x, z: 0, angle: 0, respawn: 0}], bullets: []});
++  for (let i = 0; i < 10; i++) buf.push(mk(65530 + i, i), 1000 + i * 33.333);       // wraps past 65535
++  const out = buf.sample(1000 + 9 * 33.333 + 20 - 0), x = out.players[0].x;
++  assert.ok(x > 0 && x < 9.5, `x=${x}`); assert.ok(buf.items.every((it, i, a) => !i || it.n > a[i - 1].n));
++  const mid = buf.sample(1000 + 5 * 33.333 + buf.delay + buf.offset - 1000 + 0.0).players[0].x; assert.ok(Number.isFinite(mid));
++});
+diff -ruN '--exclude=node_modules' '--exclude=tools' '--exclude=evaluation' '--exclude=vendor' '--exclude=artifacts' '--exclude=package-lock.json' a/tests/network-v2.test.js ./tests/network-v2.test.js
+--- a/tests/network-v2.test.js	1970-01-01 00:00:00.000000000 +0000
++++ ./tests/network-v2.test.js	2026-10-07 05:44:58.702050080 +0000
+@@ -0,0 +1,80 @@
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import {spawn} from 'node:child_process';
++import {WebSocket} from 'ws';
++import {decodeState} from '../shared/codec.js';
++const wait = (ms) => new Promise(r => setTimeout(r, ms));
++async function until(fn, limit = 4000) {const t = Date.now(); while (Date.now() - t < limit) {if (fn()) return; await wait(20);} throw new Error('Timed out');}
++async function boot(port, env = {}) {
++  const child = spawn(process.execPath, ['server/index.js'], {env: {...process.env, PORT: String(port), ...env}, stdio: ['ignore', 'pipe', 'pipe']});
++  let log = ''; child.stdout.on('data', b => log += b); child.stderr.on('data', b => log += b);
++  await until(() => log.includes(`localhost:${port}`)); return {child, log: () => log};
++}
++async function stop(child) {if (child.exitCode === null) {const done = new Promise(r => child.once('exit', r)); child.kill('SIGTERM'); await done;}}
++function client(port, sink) {
++  const ws = new WebSocket(`ws://127.0.0.1:${port}/ws`); const c = {ws, json: [], frames: [], bytes: 0, roster: null, events: []}; sink.push(c);
++  ws.on('message', (data, isBinary) => {
++    c.bytes += data.length;
++    if (isBinary) {const d = decodeState(new Uint8Array(data), c.roster?.players, c.roster?.v); if (d && !d.stale) c.frames.push({d, size: data.length}); return;}
++    const m = JSON.parse(data); c.json.push(m);
++    if (m.type === 'roster') c.roster = m; if (m.type === 'meta') c.meta = m; if (m.type === 'events') c.events.push(...m.events); if (m.type === 'joined') c.id = m.id;
++  });
++  return new Promise((res, rej) => {ws.once('open', () => res(c)); ws.once('error', rej);});
++}
++
++test('protocol 2: roster + meta + events then ~250 byte binary frames; legacy client in the same room still gets JSON state', async () => {
++  const {child} = await boot(17870), all = [];
++  try {
++    const host = await client(17870, all); host.ws.send(JSON.stringify({type: 'create', name: 'Host', role: 'runner', proto: 2}));
++    await until(() => host.id && host.roster && host.meta);
++    const old = await client(17870, all); old.ws.send(JSON.stringify({type: 'join', code: host.json.find(m => m.type === 'joined').code, name: 'Legacy'}));
++    await until(() => old.id); await until(() => host.roster.players.length === 2);
++    host.ws.send(JSON.stringify({type: 'start', bots: true}));
++    await until(() => host.frames.length > 30 && host.frames.at(-1).d.phase === 'playing');
++    assert.equal(host.roster.players.length, 10); assert.ok(host.frames.slice(-20).every(f => f.size < 700), 'frames stay small');
++    assert.ok(host.events.length > 0, 'feed events arrive on the reliable channel');
++    assert.ok(old.json.some(m => m.type === 'state' && m.state.players.length === 10), 'legacy JSON state still delivered');
++    assert.ok(!old.json.some(m => m.type === 'roster'), 'legacy client never receives protocol-2 messages');
++    const me = host.frames.at(-1).d.players.find(p => p.id === host.id), before = me.x;
++    for (let i = 1; i <= 20; i++) {host.ws.send(JSON.stringify({type: 'input', seq: i, input: {x: 1, z: 0, angle: 0}})); await wait(34);}
++    await until(() => host.frames.at(-1).d.players.find(p => p.id === host.id).x > before + 1);
++    const ack = host.frames.at(-1).d.players.find(p => p.id === host.id).ack; assert.notEqual(ack, 0xFFFF); assert.ok(ack >= 15, `ack ${ack}`);
++    const metrics = await (await fetch('http://127.0.0.1:17870/api/metrics')).json();
++    assert.equal(metrics.version, '1.3'); assert.equal(metrics.protocol2Clients, 1); assert.ok(metrics.tick.avgMs < 5 && metrics.network.avgFrameBytes > 0);
++  } finally {all.forEach(c => c.ws.terminate()); await stop(child);}
++});
++test('invalid, binary and oversized input never crashes the server; spammers are disconnected', async () => {
++  const {child, log} = await boot(17871), all = [];
++  try {
++    const host = await client(17871, all); host.ws.send(JSON.stringify({type: 'create', name: 'H', proto: 2})); await until(() => host.id);
++    host.ws.send(JSON.stringify({type: 'start', bots: true})); await until(() => host.frames.length > 5);
++    for (const bad of ['{', 'null', '[]', JSON.stringify({type: 7}), JSON.stringify({type: 'input', input: 'x', seq: 'a'}), JSON.stringify({type: 'input', input: {x: 'NaN', z: {}, angle: 1e999, fire: 'yes'}, seq: -5})]) host.ws.send(bad);
++    host.ws.send(Buffer.from([1, 2, 3]));
++    await wait(200);
++    const afterBad = host.frames.length; await wait(300); assert.ok(host.frames.length > afterBad, 'room keeps ticking');
++    const spam = await client(17871, all); const closed = new Promise(r => spam.ws.once('close', code => r(code)));
++    for (let i = 0; i < 80; i++) {spam.ws.send('not json'); if (i % 30 === 29) await wait(1000);}
++    assert.equal(await Promise.race([closed, wait(5000).then(() => 'timeout')]), 1008);
++    const m = await (await fetch('http://127.0.0.1:17871/api/metrics')).json(); assert.ok(m.errors.badMessages >= 40); assert.equal(m.errors.handler, 0);
++    assert.ok(!log().includes('TypeError'), log());
++  } finally {all.forEach(c => c.ws.terminate()); await stop(child);}
++});
++test('backpressure: congested sockets skip state frames but still receive reliable messages', async () => {
++  const {child} = await boot(17872, {MAX_BUFFER: '-1'}), all = [];       // -1 makes every socket look congested
++  try {
++    const host = await client(17872, all); host.ws.send(JSON.stringify({type: 'create', name: 'H', proto: 2})); await until(() => host.id && host.roster);
++    host.ws.send(JSON.stringify({type: 'start', bots: true})); await until(() => host.events.length > 0);
++    await wait(1200);
++    assert.equal(host.frames.length, 0, 'no state frames while congested');
++    const m = await (await fetch('http://127.0.0.1:17872/api/metrics')).json(); assert.ok(m.network.framesDropped > 20 && m.network.dropRatePct > 90);
++  } finally {all.forEach(c => c.ws.terminate()); await stop(child);}
++});
++test('rematch resets event ids without losing feed events (reset flag)', async () => {
++  const {child} = await boot(17873), all = [];
++  try {
++    const host = await client(17873, all); host.ws.send(JSON.stringify({type: 'create', name: 'H', proto: 2})); await until(() => host.id && host.roster);
++    host.ws.send(JSON.stringify({type: 'start', bots: true})); await until(() => host.events.length > 0 && host.frames.some(f => f.d.phase === 'playing'));
++    host.ws.send(JSON.stringify({type: 'rematch'})); await until(() => host.json.some(m => m.type === 'events' && m.reset && m.events.length === 0));
++    host.ws.send(JSON.stringify({type: 'start', bots: true})); await until(() => host.json.filter(m => m.type === 'events' && m.events.length).length >= 2 && host.frames.at(-1).d.phase === 'playing');
++  } finally {all.forEach(c => c.ws.terminate()); await stop(child);}
++});

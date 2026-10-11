@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111719"><meta name="description" content="Arena taktis 3D 5v5. Kuasai resource, pecahkan deadlock, dan menangkan perang kernel.">
+<title>DEADLOCK — Kernel Wars</title>
+<link rel="icon" href="./public/icon.svg" type="image/svg+xml"><link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<div id="scene" aria-label="Arena game tiga dimensi"></div>
+<div id="vignette"></div>
+<div id="menu">
+<header class="topbar">
+  <a class="brand" href="./" aria-label="Deadlock beranda"><span class="brand-symbol">⫷</span><span>DEADLOCK<small>K E R N E L &nbsp; W A R S</small></span></a>
+  <nav><button class="nav-item active" data-nav="play">PLAY</button><button class="nav-item" data-nav="guide">CARA MAIN <span>↗</span></button><button class="nav-item" data-nav="intel">INTEL DEADLOCK</button></nav>
+  <div class="server-status"><i id="server-dot"></i><span id="server-status">MENGHUBUNGKAN</span></div>
+  <button class="icon-button sound-toggle" title="Aktifkan atau nonaktifkan audio" aria-label="Toggle audio">♪</button>
+</header>
+<main class="home-content">
+  <section class="hero-copy">
+    <div class="eyebrow"><span class="live-dot"></span> MULTIPLAYER TACTICAL ARENA <span class="tag">5 VS 5</span></div>
+    <h1>BREAK THE<br><span>DEADLOCK.</span></h1>
+    <p class="hero-subtitle">Rebut resource. Putus siklus. Kuasai sistem.</p>
+    <p class="hero-description">Sepuluh operator. Dua core. Satu sistem yang bisa terkunci.<br>Menangkan pertempuran dengan aksi dan strategi tim.</p>
+    <div class="hero-actions"><button id="play-practice" class="button primary"><span>▶</span> MAIN SEKARANG <span class="arrow">↗</span></button><button id="open-rooms" class="button secondary">MULTIPLAYER <span>＋</span></button></div>
+    <div class="watch-entry"><button id="open-watch">◉ TONTON PERTANDINGAN</button><span>84 × 56 · EXPANDED ARENA</span></div><div class="play-note"><span>◉</span> Langsung bermain dengan 9 bot <span class="divider">/</span> Tanpa akun</div>
+    <div class="hero-stats"><div><b>10</b><span>OPERATOR</span></div><div><b>06<span>:00</span></b><span>MENIT / MATCH</span></div><div><b>04</b><span>RESOURCE UNIK</span></div></div>
+  </section>
+  <div class="arena-caption"><span class="crosshair">⌖</span><div>THE KERNEL<span>SECTOR 07 EXPANDED · 84 × 56</span></div><span class="live-label">LIVE SIMULATION</span></div>
+  <section class="bottom-section">
+    <div class="section-caption"><span>YOUR ROLE. YOUR PLAYSTYLE.</span><span>PILIH OPERATOR <span class="muted">/ 03</span></span></div>
+    <div class="role-grid">
+      <button class="role-card selected" data-role="runner"><div class="role-icon runner-icon">ϟ</div><div><div class="role-category">MOBILITY / ASSAULT</div><h3>Runner</h3><p>Rebut lebih cepat. Pulang sebelum terkunci.</p><div class="role-ability">SHIFT <span>OVERDRIVE</span></div></div><span class="role-select">✓</span></button>
+      <button class="role-card" data-role="sentinel"><div class="role-icon sentinel-icon">⬡</div><div><div class="role-category">DEFENSE / CONTROL</div><h3>Sentinel</h3><p>Tahan garis depan. Jaga jalur resource.</p><div class="role-ability">SHIFT <span>FIREWALL</span></div></div><span class="role-select">＋</span></button>
+      <button class="role-card" data-role="engineer"><div class="role-icon engineer-icon">✣</div><div><div class="role-category">SUPPORT / RECOVERY</div><h3>Engineer</h3><p>Bebaskan tim dari circular wait.</p><div class="role-ability">SHIFT <span>RECOVERY PULSE</span></div></div><span class="role-select">＋</span></button>
+    </div>
+  </section>
+</main>
+<footer class="home-footer"><span><i></i> SYSTEMS ONLINE <span class="muted">/</span> OPERATING SYSTEMS, REIMAGINED.</span><button data-nav="intel">BUKAN KUIS. INI PERANG RESOURCE. <span>↗</span></button><span class="muted">BUILD 1.3</span></footer>
+</div>
+<div id="hud" class="hidden">
+  <div class="hud-top"><button id="leave-game" class="icon-button" aria-label="Keluar pertandingan">←</button><button id="game-help" class="icon-button" aria-label="Panduan bermain">?</button><div class="hud-team cyan"><small>TEAM SYNCHRON</small><b id="score-a">00</b><div class="score-track"><i id="score-bar-a"></i></div></div><div class="match-clock"><small id="match-mode">PRACTICE · 5V5</small><strong id="timer">06:00</strong><span id="match-rule">6 MENIT PENUH</span></div><div class="hud-team coral"><small>TEAM SYNTAX</small><b id="score-b">00</b><div class="score-track"><i id="score-bar-b"></i></div></div><div class="hud-network" id="latency">LOCAL<br><small>30 TICK</small></div></div>
+  <div class="objectives-stack"><aside class="objective-panel"><div class="overline">OBJECTIVE / 01</div><h3 id="objective-title">Kunci 2 resource berbeda</h3><p id="objective-text">Dekati terminal lalu tekan E. Bawa keduanya ke core timmu.</p><div id="resource-list"></div><button id="toggle-graph">⌘ WAIT-FOR GRAPH <span>G</span></button></aside>
+  <section id="uplink-panel"><div><b id="uplink-status">UPLINK SEGERA AKTIF</b><span id="uplink-time">35s</span></div><small id="uplink-detail">Siapkan tim menuju tengah</small><div class="uplink-track"><i id="uplink-fill"></i></div></section>
+  </div><div id="event-feed" aria-live="polite"></div>
+  <div id="deadlock-alert" class="hidden"><b>⚠ DEADLOCK DETECTED</b><span>Circular wait menghentikan prosesmu.</span><button id="rollback-alert">R · ROLLBACK & LEPAS SEMUA LOCK</button></div>
+  <div id="graph-panel" class="hidden"><div class="overline">LIVE WAIT-FOR GRAPH</div><svg id="graph" viewBox="0 0 300 190" aria-label="Graf ketergantungan proses"></svg><p id="graph-note"></p></div>
+  <div id="interact-prompt" class="hidden"></div>
+  <div id="respawn-overlay" class="hidden"><span>PROCESS TERMINATED</span><h2 id="respawn-count">5</h2><p>Restarting process… Semua lock telah dilepas.</p></div>
+  <div class="player-hud"><div class="player-avatar">ϟ</div><div class="player-health"><div><b id="player-name">OPERATOR</b><span id="health-value">100 / 100</span></div><div class="health-track"><i id="health-bar"></i></div><small id="held-info">RESOURCE SLOT: EMPTY / EMPTY</small></div><div class="ability" id="ability-dash"><kbd>SPACE</kbd><span>DASH</span><strong>READY</strong></div><div class="ability" id="ability-skill"><kbd>SHIFT</kbd><span>OVERDRIVE</span><strong>READY</strong></div><button class="ability" id="rollback-button"><kbd>R</kbd><span>ROLLBACK</span><strong>−15 HP</strong></button></div>
+  <div class="hud-help"><span><kbd>W A S D</kbd> Bergerak</span><span><kbd>KLIK / F</kbd> Tembak</span><span><kbd>E</kbd> Interaksi</span><span><kbd>TAB</kbd> Skor</span><span><kbd>H</kbd> Bantuan</span></div>
+  <div id="viewer-badge">◉ <span id="viewer-count">0</span> PENONTON</div>
+  <section id="spectator-bar" class="hidden"><div class="spectator-heading"><span class="live-dot"></span><b>MODE PENONTON</b><span id="watch-details">Seluruh arena</span></div><div class="spectator-controls"><button id="watch-overview" class="selected">SELURUH ARENA</button><button id="watch-previous" aria-label="Operator sebelumnya">‹</button><select id="watch-player" aria-label="Ikuti operator"><option value="">Pilih operator</option></select><button id="watch-next" aria-label="Operator berikutnya">›</button><button id="watch-zoom-out" aria-label="Perkecil kamera">−</button><button id="watch-zoom-in" aria-label="Perbesar kamera">＋</button><button id="watch-score">SKOR</button></div><small>Hanya menonton · Tidak mengambil slot pemain</small></section>
+  <canvas id="minimap" width="180" height="126" aria-label="Peta arena"></canvas>
+  <div id="touch-controls"><div id="joystick"><i></i></div><div class="touch-actions"><button data-touch="fire">FIRE</button><button data-touch="interact">E</button><button data-touch="skill">SKILL</button><button data-touch="dash">DASH</button></div></div>
+</div>
+<div id="modal-backdrop" class="hidden"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><button id="close-modal" class="icon-button close-modal" aria-label="Tutup">✕</button><div id="modal-content"></div></section></div>
+<div id="connection-banner" class="hidden" role="status">Koneksi terputus · menyambung ulang otomatis…<small>Slot disimpan 45 detik. Pertandingan di server tetap berjalan.</small></div>
+<div id="net-warning" class="hidden" role="status">⚠ KONEKSI LAMBAT · <b>0.0s</b> tanpa data dari server</div>
+<div id="toast" role="status" class="hidden"></div>
+<script type="module" src="./src/app.js"></script>
+</body></html>
